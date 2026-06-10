@@ -1,0 +1,64 @@
+{
+  "id": "d7fcd95e",
+  "title": "España vs Marruecos — Previa táctica",
+  "topic": "Analiza las fortalezas y debilidades de España y Marruecos antes de su partido en el Mundial 2026, con estadísticas clave y jugadores a seguir",
+  "match": "España vs Marruecos",
+  "match_date": "2026-06-13",
+  "created_at": "2026-06-10T10:31:58.805320",
+  "config": {
+    "title": "España vs Marruecos — Previa táctica",
+    "topic": "Analiza las fortalezas y debilidades de España y Marruecos antes de su partido en el Mundial 2026, con estadísticas clave y jugadores a seguir",
+    "match": "España vs Marruecos",
+    "match_date": "2026-06-13",
+    "aspect": "9:16",
+    "language": "es",
+    "script": null,
+    "video": {
+      "source": "local",
+      "clip_duration": 4,
+      "local_folder": null
+    },
+    "audio": {
+      "voice": "es-ES-AlvaroNeural",
+      "speed": 1.0,
+      "volume": 0.9,
+      "custom_file": null
+    },
+    "music": {
+      "source": "local",
+      "track_file": null,
+      "volume": 0.25,
+      "fade_in": 2,
+      "fade_out": 3
+    },
+    "subtitles": {
+      "font": "Arial",
+      "font_size": 48,
+      "color": "white",
+      "outline": true,
+      "position": "bottom",
+      "custom_srt": null
+    },
+    "overlay": {
+      "logo_file": null,
+      "logo_position": "top-right",
+      "logo_opacity": 0.8,
+      "intro_file": null,
+      "outro_file": null,
+      "lower_third": null
+    }
+  },
+  "layers": {
+    "video": "pending",
+    "audio": "pending",
+    "music": "empty",
+    "subtitles": "ready",
+    "overlay": "empty"
+  },
+  "output": null,
+  "layer_info": {
+    "subtitles": {
+      "file": "projects/d7fcd95e/subtitles/subtitles.srt"
+    }
+  }
+}

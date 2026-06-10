@@ -20,7 +20,7 @@ export default function ProjectList({ projects, selected, onSelect, onNew, onDel
         padding: "16px", borderBottom: "0.5px solid var(--color-border-tertiary, #e0e0e0)",
         display: "flex", alignItems: "center", justifyContent: "space-between",
       }}>
-        <span style={{ fontWeight: 500, fontSize: 15 }}>Mundial 2026</span>
+        <span style={{ fontWeight: 500, fontSize: 15 }}>LayerCut</span>
         <button onClick={onNew} style={{
           padding: "4px 10px", borderRadius: 6, border: "0.5px solid #ccc",
           background: "transparent", cursor: "pointer", fontSize: 13,

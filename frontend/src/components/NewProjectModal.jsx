@@ -1,13 +1,19 @@
 import { useState } from "react"
 
-const MATCHES = [
-  "España vs Marruecos", "Argentina vs Francia", "Brasil vs Alemania",
-  "Portugal vs Uruguay", "España vs Argentina", "México vs Ecuador",
+const CATEGORIES = [
+  "Marketing / Promoción",
+  "Educación / Tutorial",
+  "Noticias / Actualidad",
+  "Entretenimiento",
+  "Corporativo / Empresa",
+  "Producto / Demo",
+  "Redes sociales",
+  "Otro",
 ]
 
 export default function NewProjectModal({ onCreated, onClose }) {
   const [form, setForm] = useState({
-    title: "", topic: "", match: "", match_date: "",
+    title: "", topic: "", category: "", date: "",
     aspect: "9:16", language: "es",
   })
   const [loading, setLoading] = useState(false)
@@ -34,11 +40,11 @@ export default function NewProjectModal({ onCreated, onClose }) {
     }}>
       <div style={{
         background: "var(--color-background-primary, #fff)",
-        borderRadius: 14, padding: 28, width: 460, maxWidth: "90vw",
+        borderRadius: 14, padding: 28, width: 480, maxWidth: "90vw",
         border: "0.5px solid var(--color-border-tertiary, #e0e0e0)",
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 20 }}>
-          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 500 }}>Nuevo vídeo</h2>
+          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 500 }}>Nuevo proyecto</h2>
           <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#999" }}>✕</button>
         </div>
 
@@ -46,46 +52,49 @@ export default function NewProjectModal({ onCreated, onClose }) {
           <div>
             <label style={labelStyle}>Título del vídeo</label>
             <input value={form.title} onChange={e => set("title", e.target.value)}
-              placeholder="España vs Marruecos — Previa táctica"
+              placeholder="Ej: Cómo usar RFID en hoteles, Tutorial de Odoo, Resumen del partido..."
               style={inputStyle} />
           </div>
 
           <div>
             <label style={labelStyle}>Tema / Prompt para el guión</label>
             <textarea value={form.topic} onChange={e => set("topic", e.target.value)}
-              placeholder="Analiza las fortalezas y debilidades de ambas selecciones antes del partido, con estadísticas clave del Mundial 2026"
-              style={{ ...inputStyle, height: 80, resize: "vertical" }} />
-          </div>
-
-          <div>
-            <label style={labelStyle}>Partido (opcional)</label>
-            <select value={form.match} onChange={e => set("match", e.target.value)} style={inputStyle}>
-              <option value="">— Sin partido específico —</option>
-              {MATCHES.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
+              placeholder="Describe de qué trata el vídeo. Cuanto más detalle, mejor será el guión generado automáticamente."
+              style={{ ...inputStyle, height: 90, resize: "vertical" }} />
           </div>
 
           <div style={{ display: "flex", gap: 12 }}>
             <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Fecha del partido</label>
-              <input type="date" value={form.match_date} onChange={e => set("match_date", e.target.value)} style={inputStyle} />
+              <label style={labelStyle}>Categoría</label>
+              <select value={form.category} onChange={e => set("category", e.target.value)} style={inputStyle}>
+                <option value="">— Seleccionar —</option>
+                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
             </div>
+            <div style={{ flex: 1 }}>
+              <label style={labelStyle}>Fecha (opcional)</label>
+              <input type="date" value={form.date} onChange={e => set("date", e.target.value)} style={inputStyle} />
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 12 }}>
             <div style={{ flex: 1 }}>
               <label style={labelStyle}>Formato</label>
               <select value={form.aspect} onChange={e => set("aspect", e.target.value)} style={inputStyle}>
-                <option value="9:16">9:16 Vertical (YouTube Shorts / TikTok)</option>
+                <option value="9:16">9:16 Vertical (Shorts / TikTok / Reels)</option>
                 <option value="16:9">16:9 Horizontal (YouTube)</option>
+                <option value="1:1">1:1 Cuadrado (Instagram)</option>
               </select>
             </div>
-          </div>
-
-          <div style={{ display: "flex", gap: 12 }}>
             <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Idioma</label>
+              <label style={labelStyle}>Idioma del guión</label>
               <select value={form.language} onChange={e => set("language", e.target.value)} style={inputStyle}>
                 <option value="es">Español</option>
                 <option value="pt">Portugués</option>
-                <option value="en">Inglés</option>
+                <option value="en">English</option>
+                <option value="it">Italiano</option>
+                <option value="fr">Français</option>
+                <option value="de">Deutsch</option>
               </select>
             </div>
           </div>
