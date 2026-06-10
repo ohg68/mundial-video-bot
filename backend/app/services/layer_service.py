@@ -30,21 +30,20 @@ Responde SOLO con el guión, sin introducción ni explicación."""
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
+            "https://api.deepseek.com/chat/completions",
             headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "deepseek-chat",
                 "max_tokens": 1000,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=30,
         )
         data = resp.json()
-        script = data["content"][0]["text"]
+        script = data["choices"][0]["message"]["content"]
 
     meta = project_service.get_project(project_id)
     meta["config"]["script"] = script
