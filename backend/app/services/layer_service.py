@@ -138,7 +138,9 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             clips = list(clips_dir.glob("*.mp4"))[:8]
 
     if config.video.source in (VideoSource.pexels, VideoSource.mixed) and len(clips) < 8:
-        pexels_urls = await fetch_pexels_clips(config.topic, 8 - len(clips))
+        # Use only first 4 words of topic for Pexels search
+        pexels_query = " ".join(config.topic.split()[:4])
+        pexels_urls = await fetch_pexels_clips(pexels_query, 8 - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         dl_dir.mkdir(parents=True, exist_ok=True)
         async with httpx.AsyncClient() as client:
