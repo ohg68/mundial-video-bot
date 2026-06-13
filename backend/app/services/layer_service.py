@@ -67,16 +67,28 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
         import shutil
         shutil.copy2(config.audio.custom_file, output_path)
     else:
+        # edge-tts generates webm/opus internally; save to temp then convert to mp3
+        tmp_path = output_path.with_suffix(".tmp.mp3")
         proc = await asyncio.create_subprocess_exec(
             "edge-tts",
             "--voice", voice,
             "--rate", f"+{int((config.audio.speed - 1) * 100)}%",
             "--text", script,
-            "--write-media", str(output_path),
+            "--write-media", str(tmp_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         await proc.communicate()
+        # Convert to proper mp3 with ffmpeg
+        conv = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", str(tmp_path),
+            "-acodec", "libmp3lame", "-q:a", "2",
+            str(output_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await conv.communicate()
+        tmp_path.unlink(missing_ok=True)
 
     project_service.update_layer_status(project_id, "audio", LayerStatus.ready, {
         "voice": voice or "custom",
