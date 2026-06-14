@@ -28,14 +28,15 @@ def _escape_srt_path(p: Path) -> str:
     return s
 
 
-async def render_final(project_id: str) -> Path:
+async def render_final(project_id: str, quality: str = "full") -> Path:
     meta = project_service.get_project(project_id)
     if not meta:
         raise ValueError(f"Project {project_id} not found")
 
     config = meta["config"]
     project_dir = Path("projects") / project_id
-    output_path = project_dir / "output" / "final.mp4"
+    output_name = "preview.mp4" if quality == "quick" else "final.mp4"
+    output_path = project_dir / "output" / output_name
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     video_path   = project_service.get_layer_path(project_id, "video")
@@ -127,8 +128,11 @@ async def render_final(project_id: str) -> Path:
         cmd += ["-map", audio_map]
 
     cmd += [
-        "-c:v", "libx264", "-crf", "22", "-preset", "fast",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:v", "libx264",
+        "-crf", "32" if quality == "quick" else "22",
+        "-preset", "ultrafast" if quality == "quick" else "fast",
+        *(["-vf", "scale=-2:540"] if quality == "quick" else []),
+        "-c:a", "aac", "-b:a", "96k" if quality == "quick" else "192k",
         "-shortest",
         str(output_path),
     ]
