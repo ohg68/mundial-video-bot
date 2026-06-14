@@ -1,7 +1,23 @@
 import asyncio
+import logging
+import subprocess
 from pathlib import Path
 from app.services import project_service
 from app.models.project import LayerStatus
+
+log = logging.getLogger(__name__)
+
+_has_subtitles_filter = None
+
+
+def _check_subtitles_filter() -> bool:
+    global _has_subtitles_filter
+    if _has_subtitles_filter is None:
+        r = subprocess.run(
+            ["ffmpeg", "-filters"], capture_output=True, text=True,
+        )
+        _has_subtitles_filter = "subtitles" in r.stdout
+    return _has_subtitles_filter
 
 
 def _escape_srt_path(p: Path) -> str:
@@ -77,11 +93,11 @@ async def render_final(project_id: str) -> Path:
 
     video_label = "[0:v]"
 
-    if has_subs:
+    if has_subs and _check_subtitles_filter():
         srt_esc = _escape_srt_path(sub_path)
         sub_cfg = config.get("subtitles", {})
         filter_parts.append(
-            f"{video_label}subtitles='{srt_esc}':force_style='"
+            f"{video_label}subtitles={srt_esc}:force_style='"
             f"FontName={sub_cfg.get('font', 'Arial')},"
             f"FontSize={sub_cfg.get('font_size', 48)},"
             f"PrimaryColour=&H00FFFFFF,"
@@ -90,6 +106,8 @@ async def render_final(project_id: str) -> Path:
             f"Alignment=2'[vsub]"
         )
         video_label = "[vsub]"
+    elif has_subs:
+        log.warning("Subtitles skipped — FFmpeg lacks libass (subtitles filter)")
 
     if has_overlay:
         filter_parts.append(
