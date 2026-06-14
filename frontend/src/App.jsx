@@ -3,21 +3,46 @@ import ProjectList from "./components/ProjectList"
 import ProjectEditor from "./components/ProjectEditor"
 import NewProjectModal from "./components/NewProjectModal"
 import BottomNav from "./components/BottomNav"
+import LoginForm from "./components/LoginForm"
+import useAuth from "./hooks/useAuth"
+import { apiJson } from "./api"
 
 export default function App() {
+  const { user, loading: authLoading, login, register, logout } = useAuth()
   const [projects, setProjects] = useState([])
   const [selected, setSelected] = useState(null)
   const [showNew, setShowNew] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [mobileTab, setMobileTab] = useState("projects")
+  const [categoryFilter, setCategoryFilter] = useState("")
 
   const fetchProjects = async () => {
-    const res = await fetch("/api/projects/")
-    const data = await res.json()
-    setProjects(data)
+    const url = categoryFilter
+      ? `/api/projects/?category=${encodeURIComponent(categoryFilter)}`
+      : "/api/projects/"
+    const data = await apiJson(url)
+    if (Array.isArray(data)) setProjects(data)
   }
 
-  useEffect(() => { fetchProjects() }, [])
+  useEffect(() => {
+    if (user) fetchProjects()
+  }, [user, categoryFilter])
+
+  const handleAuth = async (mode, username, password) => {
+    return mode === "login" ? login(username, password) : register(username, password)
+  }
+
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center h-[100dvh] bg-gray-50 text-gray-400">
+        Cargando...
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <LoginForm onAuth={handleAuth} />
+  }
 
   const handleCreated = (project) => {
     setProjects(prev => [project, ...prev])
@@ -67,6 +92,10 @@ export default function App() {
           onNew={() => setShowNew(true)}
           onDeleted={handleDeleted}
           onRefresh={fetchProjects}
+          categoryFilter={categoryFilter}
+          onCategoryFilter={setCategoryFilter}
+          user={user}
+          onLogout={logout}
         />
       </aside>
 

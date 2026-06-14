@@ -1,21 +1,46 @@
+import logging
+import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.api import projects, layers, render, publish, sources
-import os
+from app.auth import router as auth_router
+from app.database import init_db
+from app.migrate import migrate_json_to_db
+from app.task_queue import task_queue
+from app.websocket import websocket_endpoint
 
-app = FastAPI(title="LayerCut API", version="1.0.0")
+logging.basicConfig(level=logging.INFO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    migrate_json_to_db()
+    await task_queue.start()
+    yield
+    await task_queue.stop()
+
+
+app = FastAPI(title="LayerCut API", version="2.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(layers.router, prefix="/api/layers", tags=["layers"])
 app.include_router(render.router, prefix="/api/render", tags=["render"])
 app.include_router(publish.router, prefix="/api/publish", tags=["publish"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 
+app.add_api_websocket_route("/ws/{project_id}", websocket_endpoint)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "LayerCut"}
+
 
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(static_dir):
@@ -29,7 +54,7 @@ if os.path.exists(static_dir):
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
-        if full_path.startswith("api") or full_path == "health":
+        if full_path.startswith("api") or full_path.startswith("ws") or full_path == "health":
             from fastapi import HTTPException
             raise HTTPException(status_code=404)
         return FileResponse(os.path.join(static_dir, "index.html"))

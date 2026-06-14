@@ -1,16 +1,30 @@
 import { useState, useEffect } from "react"
+import { apiJson } from "../api"
 
 const STATUS_COLOR = {
   ready: "bg-green-500", pending: "bg-amber-400", empty: "bg-gray-300", error: "bg-red-500"
 }
 
-export default function ProjectList({ projects, selected, onSelect, onNew, onDeleted, onRefresh }) {
+const CATEGORIES = [
+  "Marketing / Promoción",
+  "Educación / Tutorial",
+  "Noticias / Actualidad",
+  "Entretenimiento",
+  "Corporativo / Empresa",
+  "Producto / Demo",
+  "Redes sociales",
+]
+
+export default function ProjectList({
+  projects, selected, onSelect, onNew, onDeleted, onRefresh,
+  categoryFilter, onCategoryFilter, user, onLogout,
+}) {
   const [bulkMode, setBulkMode] = useState(false)
   const [checked, setChecked] = useState(new Set())
   const [stats, setStats] = useState(null)
 
   useEffect(() => {
-    fetch("/api/projects/stats").then(r => r.json()).then(setStats).catch(() => {})
+    apiJson("/api/projects/stats").then(setStats).catch(() => {})
   }, [projects.length])
 
   const toggleCheck = (id) => {
@@ -23,10 +37,9 @@ export default function ProjectList({ projects, selected, onSelect, onNew, onDel
 
   const handleBulkDelete = async () => {
     if (!checked.size || !confirm(`¿Eliminar ${checked.size} proyecto(s)?`)) return
-    await fetch("/api/projects/bulk-delete", {
+    await apiJson("/api/projects/bulk-delete", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project_ids: [...checked] }),
+      body: { project_ids: [...checked] },
     })
     checked.forEach(id => onDeleted(id))
     setChecked(new Set())
@@ -36,14 +49,14 @@ export default function ProjectList({ projects, selected, onSelect, onNew, onDel
 
   const handleDuplicate = async (e, id) => {
     e.stopPropagation()
-    const res = await fetch(`/api/projects/${id}/duplicate`, { method: "POST" })
-    if (res.ok) onRefresh()
+    await apiJson(`/api/projects/${id}/duplicate`, { method: "POST" })
+    onRefresh()
   }
 
   const handleDelete = async (e, id) => {
     e.stopPropagation()
     if (!confirm("¿Eliminar este proyecto?")) return
-    await fetch(`/api/projects/${id}`, { method: "DELETE" })
+    await apiJson(`/api/projects/${id}`, { method: "DELETE" })
     onDeleted(id)
   }
 
@@ -59,7 +72,7 @@ export default function ProjectList({ projects, selected, onSelect, onNew, onDel
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
         <span className="font-medium text-[15px]">LayerCut</span>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
           <button
             onClick={() => { setBulkMode(!bulkMode); setChecked(new Set()) }}
             className={`px-2 py-1 rounded text-xs cursor-pointer border transition-colors
@@ -74,6 +87,28 @@ export default function ProjectList({ projects, selected, onSelect, onNew, onDel
             + Nuevo
           </button>
         </div>
+      </div>
+
+      {/* Category filter */}
+      <div className="px-3 py-2 border-b border-gray-100 flex gap-1 flex-wrap">
+        <button
+          onClick={() => onCategoryFilter("")}
+          className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer transition-colors
+            ${!categoryFilter ? "bg-[#0C447C] text-white border-[#0C447C]" : "bg-transparent text-gray-400 border-gray-200"}`}
+        >
+          Todos
+        </button>
+        {CATEGORIES.map(cat => (
+          <button
+            key={cat}
+            onClick={() => onCategoryFilter(categoryFilter === cat ? "" : cat)}
+            className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer transition-colors truncate max-w-[90px]
+              ${categoryFilter === cat ? "bg-[#0C447C] text-white border-[#0C447C]" : "bg-transparent text-gray-400 border-gray-200"}`}
+            title={cat}
+          >
+            {cat.split(" / ")[0]}
+          </button>
+        ))}
       </div>
 
       {/* Bulk actions */}
@@ -123,9 +158,12 @@ export default function ProjectList({ projects, selected, onSelect, onNew, onDel
                     </div>
                   )}
                 </div>
-                {p.match_date && (
-                  <span className="text-[11px] text-gray-400">{p.match_date}</span>
-                )}
+                <div className="flex gap-2 items-center mt-0.5">
+                  {p.match_date && <span className="text-[11px] text-gray-400">{p.match_date}</span>}
+                  {p.category && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{p.category.split(" / ")[0]}</span>
+                  )}
+                </div>
                 <div className="flex gap-1 flex-wrap mt-1 items-center">
                   {Object.entries(p.layers || {}).map(([layer, status]) => (
                     <span
@@ -142,13 +180,21 @@ export default function ProjectList({ projects, selected, onSelect, onNew, onDel
         })}
       </div>
 
-      {/* Disk stats footer */}
-      {stats && (
-        <div className="px-4 py-2.5 border-t border-gray-200 bg-gray-50 text-[11px] text-gray-500 flex justify-between">
-          <span>{stats.total_projects} proyectos</span>
-          <span>{formatSize(stats.total_size)}</span>
+      {/* Footer: stats + user */}
+      <div className="px-4 py-2.5 border-t border-gray-200 bg-gray-50 flex justify-between items-center">
+        <div className="text-[11px] text-gray-500">
+          {stats ? `${stats.project_count} proy · ${formatSize(stats.total_bytes)}` : ""}
         </div>
-      )}
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-gray-400">{user?.username}</span>
+          <button
+            onClick={onLogout}
+            className="text-[10px] text-red-400 bg-transparent border-none cursor-pointer hover:text-red-600"
+          >
+            Salir
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
