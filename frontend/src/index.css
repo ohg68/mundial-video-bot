@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+@layer components {
+  .btn-outline {
+    @apply px-3.5 py-1.5 rounded-lg border border-gray-300 bg-transparent cursor-pointer text-[13px] hover:bg-gray-50 transition-colors;
+  }
+  .btn-action {
+    @apply px-3 py-1.5 rounded-lg border border-gray-300 bg-transparent cursor-pointer text-xs hover:bg-gray-50 transition-colors;
+  }
+  .input-field {
+    @apply w-full px-2.5 py-[7px] rounded-lg border border-gray-300 text-[13px] bg-white text-gray-900 focus:outline-none focus:border-[#0C447C] transition-colors;
+  }
+}
