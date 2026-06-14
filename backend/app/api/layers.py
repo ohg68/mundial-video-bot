@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
 from app.models.project import ProjectConfig, LayerUpdate
-from app.services import project_service, layer_service
-import tempfile, shutil
+from app.services import project_service, layer_service, tts_service, llm_service
+import tempfile, shutil, json
 from pathlib import Path
 
 router = APIRouter()
@@ -16,11 +16,22 @@ async def generate_layer(project_id: str, layer: str, background_tasks: Backgrou
     config = ProjectConfig(**project["config"])
 
     if layer == "script":
-        script = await layer_service.generate_script(project_id, config)
-        return {"script": script}
+        provider = config.llm_provider
+        template = config.script_template
+        script = await llm_service.generate_script(
+            config.topic, provider, template, config.language,
+            config.match, config.match_date,
+        )
+        project["config"]["script"] = script
+        project_dir = Path("projects") / project_id
+        (project_dir / "project.json").write_text(
+            json.dumps(project, indent=2, ensure_ascii=False)
+        )
+        timestamps = llm_service.estimate_timestamps(script)
+        return {"script": script, "timestamps": timestamps, "provider": provider}
 
     elif layer == "audio":
-        background_tasks.add_task(layer_service.generate_audio, project_id, config)
+        background_tasks.add_task(_generate_audio_task, project_id, config)
         return {"status": "generating", "layer": "audio"}
 
     elif layer == "video":
@@ -33,6 +44,31 @@ async def generate_layer(project_id: str, layer: str, background_tasks: Backgrou
 
     else:
         raise HTTPException(status_code=400, detail=f"Cannot auto-generate layer: {layer}")
+
+
+async def _generate_audio_task(project_id: str, config: ProjectConfig):
+    from app.models.project import LayerStatus
+    project_service.update_layer_status(project_id, "audio", LayerStatus.pending)
+    script = config.script
+    if not script:
+        script = await llm_service.generate_script(
+            config.topic, config.llm_provider, config.script_template,
+            config.language, config.match, config.match_date,
+        )
+    output_path = project_service.get_layer_path(project_id, "audio")
+    provider = config.audio.tts_provider
+    voice = config.audio.voice.value if config.audio.voice.value != "custom" else "es-ES-AlvaroNeural"
+    voice_id = config.audio.elevenlabs_voice_id
+    if provider == "openai":
+        voice = config.audio.openai_voice
+
+    await tts_service.generate_full(provider, script, output_path, voice, voice_id, config.audio.speed)
+    project_service.update_layer_status(project_id, "audio", LayerStatus.ready, {
+        "voice": voice,
+        "provider": provider,
+        "file": str(output_path),
+    })
+
 
 @router.post("/{project_id}/replace/{layer}")
 async def replace_layer(project_id: str, layer: str, file: UploadFile = File(...)):
@@ -68,8 +104,6 @@ async def update_layer_config(project_id: str, layer: str, update: dict):
         raise HTTPException(status_code=404, detail="Project not found")
 
     project["config"][layer] = {**project["config"].get(layer, {}), **update}
-    from pathlib import Path
-    import json
     project_dir = Path("projects") / project_id
     (project_dir / "project.json").write_text(json.dumps(project, indent=2, ensure_ascii=False))
     return {"updated": layer, "config": project["config"][layer]}
@@ -87,8 +121,6 @@ async def update_script(project_id: str, body: dict):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     project["config"]["script"] = body.get("script", "")
-    from pathlib import Path
-    import json
     (Path("projects") / project_id / "project.json").write_text(
         json.dumps(project, indent=2, ensure_ascii=False)
     )

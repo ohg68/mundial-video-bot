@@ -5,7 +5,15 @@ from enum import Enum
 class VideoSource(str, Enum):
     local = "local"
     pexels = "pexels"
+    pixabay = "pixabay"
+    coverr = "coverr"
+    youtube = "youtube"
     mixed = "mixed"
+
+class TTSProvider(str, Enum):
+    edge = "edge"
+    openai = "openai"
+    elevenlabs = "elevenlabs"
 
 class VoiceModel(str, Enum):
     alvaro = "es-ES-AlvaroNeural"
@@ -13,6 +21,18 @@ class VoiceModel(str, Enum):
     duarte = "pt-PT-DuarteNeural"
     ines = "pt-PT-InesNeural"
     custom = "custom"
+
+class LLMProvider(str, Enum):
+    deepseek = "deepseek"
+    claude = "claude"
+    openai = "openai"
+
+class ScriptTemplate(str, Enum):
+    free = "free"
+    preview = "preview"
+    summary = "summary"
+    top5 = "top5"
+    tutorial = "tutorial"
 
 class LayerStatus(str, Enum):
     empty = "empty"
@@ -27,6 +47,9 @@ class VideoLayerConfig(BaseModel):
 
 class AudioLayerConfig(BaseModel):
     voice: VoiceModel = VoiceModel.alvaro
+    tts_provider: TTSProvider = TTSProvider.edge
+    openai_voice: str = "onyx"
+    elevenlabs_voice_id: Optional[str] = None
     speed: float = 1.0
     volume: float = 0.9
     custom_file: Optional[str] = None
@@ -62,6 +85,8 @@ class ProjectConfig(BaseModel):
     aspect: Literal["9:16", "16:9"] = "9:16"
     language: str = "es"
     script: Optional[str] = None
+    llm_provider: LLMProvider = LLMProvider.deepseek
+    script_template: ScriptTemplate = ScriptTemplate.free
     video: VideoLayerConfig = VideoLayerConfig()
     audio: AudioLayerConfig = AudioLayerConfig()
     music: MusicLayerConfig = MusicLayerConfig()

@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from app.api import projects, layers, render, publish
+from app.api import projects, layers, render, publish, sources
 import os
 
 app = FastAPI(title="LayerCut API", version="1.0.0")
@@ -11,6 +11,7 @@ app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(layers.router, prefix="/api/layers", tags=["layers"])
 app.include_router(render.router, prefix="/api/render", tags=["render"])
 app.include_router(publish.router, prefix="/api/publish", tags=["publish"])
+app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 
 @app.get("/health")
 def health():
