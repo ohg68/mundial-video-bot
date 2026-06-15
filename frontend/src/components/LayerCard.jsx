@@ -26,6 +26,8 @@ const VIDEO_SOURCES = [
   { key: "coverr", label: "🎥 Coverr" },
   { key: "youtube", label: "▶ YouTube CC" },
   { key: "mixed", label: "🔀 Mixto" },
+  { key: "photos", label: "🖼 Fotos de Internet" },
+  { key: "mixed_photos", label: "🎞 Mix (Fotos + Video)" },
 ]
 
 export default function LayerCard({ projectId, layer, status, config, layerInfo, onUpdate }) {

@@ -1,11 +1,13 @@
 import os
+import logging
 import httpx
 import asyncio
 import subprocess
 from pathlib import Path
 from app.models.project import ProjectConfig, VideoSource, LayerStatus
-from app.services import project_service
+from app.services import project_service, photo_sources
 
+log = logging.getLogger(__name__)
 LOCAL_CLIPS_DIR = Path(os.getenv("LOCAL_CLIPS_DIR", "clips"))
 
 
@@ -137,20 +139,106 @@ async def fetch_pexels_clips(query: str, count: int = 8) -> list:
     return urls
 
 
+async def _get_audio_duration(path: Path) -> float:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "quiet",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return float(stdout.decode().strip())
+    except Exception:
+        return 0.0
+
+
 async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     project_service.update_layer_status(project_id, "video", LayerStatus.pending)
     output_path = project_service.get_layer_path(project_id, "video")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    clips = []
+    clips: list[Path] = []
+    aspect = config.aspect
 
+    # ── Photo-based sources ────────────────────────────────────────
+    if config.video.source in (VideoSource.photos, VideoSource.mixed_photos):
+        from app.websocket import manager
+
+        n_photos = 6 if config.video.source == VideoSource.photos else 3
+
+        # Match per-clip duration to audio length when available
+        clip_dur = float(config.video.clip_duration or 4)
+        audio_path = project_service.get_layer_path(project_id, "audio")
+        if audio_path.exists() and config.video.source == VideoSource.photos:
+            audio_dur = await _get_audio_duration(audio_path)
+            if audio_dur > 0:
+                clip_dur = round(audio_dur / n_photos, 2)
+
+        async def _on_progress(data):
+            await manager.send_progress(project_id, data)
+
+        photo_clips_dir = Path("projects") / project_id / "video" / "photo_clips"
+        photo_clips = await photo_sources.fetch_photo_clips(
+            query=config.topic,
+            dest_dir=photo_clips_dir,
+            count=n_photos,
+            duration=clip_dur,
+            aspect=aspect,
+            on_progress=_on_progress,
+        )
+
+        pexels_query = " ".join(config.topic.split()[:4])
+        dl_dir = Path("projects") / project_id / "video" / "downloads"
+        dl_dir.mkdir(parents=True, exist_ok=True)
+
+        if config.video.source == VideoSource.photos:
+            if photo_clips:
+                clips = photo_clips
+            else:
+                # Fallback: SERPAPI_API_KEY not set or search returned nothing
+                log.warning("Photo search unavailable — falling back to Pexels")
+                await manager.send_progress(project_id, {
+                    "type": "progress", "task_type": "video", "progress": 20,
+                    "msg": "Sin SERPAPI_API_KEY — usando Pexels como alternativa",
+                })
+                pexels_urls = await fetch_pexels_clips(pexels_query, 6)
+                async with httpx.AsyncClient() as client:
+                    for i, url in enumerate(pexels_urls):
+                        dest = dl_dir / f"pexels_fallback_{i}.mp4"
+                        if not dest.exists():
+                            r = await client.get(url, timeout=30, follow_redirects=True)
+                            dest.write_bytes(r.content)
+                        clips.append(dest)
+        else:
+            # mixed_photos: always fetch pexels (fills in if photos also failed)
+            pexels_clips: list[Path] = []
+            pexels_urls = await fetch_pexels_clips(pexels_query, 3)
+            async with httpx.AsyncClient() as client:
+                for i, url in enumerate(pexels_urls):
+                    dest = dl_dir / f"pexels_mix_{i}.mp4"
+                    if not dest.exists():
+                        r = await client.get(url, timeout=30, follow_redirects=True)
+                        dest.write_bytes(r.content)
+                    pexels_clips.append(dest)
+            # Interleave: photo, video, photo, video, ...
+            # If photo_clips is empty (no API key), result is pexels-only — still usable
+            for i in range(max(len(photo_clips), len(pexels_clips))):
+                if i < len(photo_clips):
+                    clips.append(photo_clips[i])
+                if i < len(pexels_clips):
+                    clips.append(pexels_clips[i])
+
+    # ── Local clips ────────────────────────────────────────────────
     if config.video.source in (VideoSource.local, VideoSource.mixed):
         clips_dir = Path(config.video.local_folder or LOCAL_CLIPS_DIR)
         if clips_dir.exists():
             clips = list(clips_dir.glob("*.mp4"))[:8]
 
+    # ── Pexels clips ───────────────────────────────────────────────
     if config.video.source in (VideoSource.pexels, VideoSource.mixed) and len(clips) < 8:
-        # Use only first 4 words of topic for Pexels search
         pexels_query = " ".join(config.topic.split()[:4])
         pexels_urls = await fetch_pexels_clips(pexels_query, 8 - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
@@ -171,11 +259,12 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     list_file = Path("projects") / project_id / "video" / "clips.txt"
     list_file.write_text("\n".join(f"file '{c.resolve()}'" for c in clips))
 
+    w, h = (1080, 1920) if aspect == "9:16" else (1920, 1080)
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
         "-i", str(list_file),
-        "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+        "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
         "-c:v", "libx264", "-crf", "23",
         "-an",
         str(output_path),

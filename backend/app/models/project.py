@@ -9,6 +9,8 @@ class VideoSource(str, Enum):
     coverr = "coverr"
     youtube = "youtube"
     mixed = "mixed"
+    photos = "photos"
+    mixed_photos = "mixed_photos"
 
 class TTSProvider(str, Enum):
     edge = "edge"

@@ -8,3 +8,4 @@ sqlalchemy==2.0.30
 google-api-python-client==2.131.0
 google-auth==2.29.0
 google-auth-oauthlib==1.2.0
+google-search-results==2.4.2
