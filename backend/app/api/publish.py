@@ -13,7 +13,8 @@ router = APIRouter()
 
 @router.post("/{project_id}/youtube")
 async def publish_youtube(project_id: str, body: dict):
-    result = await publish_service.publish_youtube(project_id, title=body.get("title", ""), **body)
+    kw = {k: v for k, v in body.items() if k != "title"}
+    result = await publish_service.publish_youtube(project_id, title=body.get("title", ""), **kw)
     if result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result.get("message"))
     return result
@@ -21,15 +22,16 @@ async def publish_youtube(project_id: str, body: dict):
 
 @router.post("/{project_id}/tiktok")
 async def publish_tiktok(project_id: str, body: dict):
-    result = await publish_service.publish_tiktok(project_id, title=body.get("title", ""), **body)
+    kw = {k: v for k, v in body.items() if k != "title"}
+    result = await publish_service.publish_tiktok(project_id, title=body.get("title", ""), **kw)
     return result
 
 
 @router.post("/{project_id}/instagram")
 async def publish_instagram(project_id: str, body: dict):
-    result = await publish_service.publish_instagram(
-        project_id, caption=body.get("caption", body.get("title", "")), **body
-    )
+    caption = body.get("caption") or body.get("title", "")
+    kw = {k: v for k, v in body.items() if k not in ("caption", "title")}
+    result = await publish_service.publish_instagram(project_id, caption=caption, **kw)
     return result
 
 
