@@ -54,7 +54,7 @@ mundial-video-bot/
 │   │       ├── llm_service.py        # DeepSeek/Claude/OpenAI + templates + timestamps
 │   │       ├── tts_service.py        # Edge-TTS/OpenAI/ElevenLabs
 │   │       ├── video_sources.py      # Pexels/Pixabay/Coverr/YouTube search + download
-│   │       ├── photo_sources.py      # Google Images via SerpAPI + descarga paralela + Ken Burns FFmpeg
+│   │       ├── photo_sources.py      # Fotos via Pexels + Pixabay Photos API + descarga paralela + Ken Burns FFmpeg
 │   │       ├── publish_service.py    # Multi-platform publish + thumbnails
 │   │       └── layer_service.py      # Ensamblado capa video (local/pexels/photos/mixed_photos)
 │

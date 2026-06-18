@@ -118,6 +118,16 @@ async def render_final(project_id: str, quality: str = "full") -> Path:
 
     video_map = video_label if video_label != "[0:v]" else "0:v"
 
+    # Quick render: scale to 540p. If the video is already in filter_complex we must
+    # add the scale there; otherwise a simple -vf works.
+    use_vf_scale = False
+    if quality == "quick":
+        if filter_parts and video_map.startswith("["):
+            filter_parts.append(f"{video_map}scale=-2:540[qvout]")
+            video_map = "[qvout]"
+        else:
+            use_vf_scale = True
+
     cmd = ["ffmpeg", "-y"] + inputs
 
     if filter_parts:
@@ -131,7 +141,7 @@ async def render_final(project_id: str, quality: str = "full") -> Path:
         "-c:v", "libx264",
         "-crf", "32" if quality == "quick" else "22",
         "-preset", "ultrafast" if quality == "quick" else "fast",
-        *(["-vf", "scale=-2:540"] if quality == "quick" else []),
+        *(["-vf", "scale=-2:540"] if use_vf_scale else []),
         "-c:a", "aac", "-b:a", "96k" if quality == "quick" else "192k",
         "-shortest",
         str(output_path),
