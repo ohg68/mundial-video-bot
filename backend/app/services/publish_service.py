@@ -43,11 +43,14 @@ async def generate_thumbnail(project_id: str, timestamp: float = 2.0) -> Path:
 
 
 async def publish_tiktok(project_id: str, title: str, **kwargs) -> dict:
-    output_path = _get_output(project_id)
     access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
     if not access_token:
         return {"status": "mock", "platform": "tiktok",
                 "message": "TIKTOK_ACCESS_TOKEN not configured"}
+    try:
+        output_path = _get_output(project_id)
+    except ValueError as e:
+        return {"status": "error", "platform": "tiktok", "message": str(e)}
 
     try:
         import httpx
@@ -79,12 +82,15 @@ async def publish_tiktok(project_id: str, title: str, **kwargs) -> dict:
 
 
 async def publish_instagram(project_id: str, caption: str, **kwargs) -> dict:
-    output_path = _get_output(project_id)
     access_token = os.getenv("INSTAGRAM_ACCESS_TOKEN")
     ig_user_id = os.getenv("INSTAGRAM_USER_ID")
     if not access_token or not ig_user_id:
         return {"status": "mock", "platform": "instagram",
                 "message": "INSTAGRAM_ACCESS_TOKEN/INSTAGRAM_USER_ID not configured"}
+    try:
+        output_path = _get_output(project_id)
+    except ValueError as e:
+        return {"status": "error", "platform": "instagram", "message": str(e)}
 
     try:
         import httpx
@@ -116,14 +122,16 @@ async def publish_instagram(project_id: str, caption: str, **kwargs) -> dict:
 
 
 async def publish_youtube(project_id: str, title: str, **kwargs) -> dict:
-    output_path = _get_output(project_id)
-    description = kwargs.get("description", "")
-    tags = kwargs.get("tags", ["Mundial2026", "Fútbol"])
-    privacy = kwargs.get("privacy", "public")
-
     if not os.getenv("YOUTUBE_TOKEN"):
         return {"status": "error", "platform": "youtube",
                 "message": "YOUTUBE_TOKEN no configurado en Railway"}
+    try:
+        output_path = _get_output(project_id)
+    except ValueError as e:
+        return {"status": "error", "platform": "youtube", "message": str(e)}
+    description = kwargs.get("description", "")
+    tags = kwargs.get("tags", ["Mundial2026", "Fútbol"])
+    privacy = kwargs.get("privacy", "public")
 
     try:
         from googleapiclient.discovery import build
