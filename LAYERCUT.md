@@ -104,9 +104,8 @@ mundial-video-bot/
 | `ANTHROPIC_API_KEY` | No | Claude como LLM alternativo |
 | `OPENAI_API_KEY` | No | GPT-4o-mini + TTS HD |
 | `ELEVENLABS_API_KEY` | No | Voces ElevenLabs |
-| `PEXELS_API_KEY` | No | Busqueda clips Pexels |
-| `PIXABAY_API_KEY` | No | Busqueda clips Pixabay |
-| `SERPAPI_API_KEY` | No | Busqueda fotos Google Images (fuente `photos` / `mixed_photos`) — fallback a Pexels si no esta configurada |
+| `PEXELS_API_KEY` | No | Busqueda clips y fotos Pexels (fuente `photos` / `mixed_photos` usan el API de fotos) |
+| `PIXABAY_API_KEY` | No | Busqueda clips y fotos Pixabay (idem) |
 | `TIKTOK_ACCESS_TOKEN` | No | Publicar en TikTok |
 | `INSTAGRAM_ACCESS_TOKEN` | No | Publicar en Instagram |
 | `INSTAGRAM_USER_ID` | No | Publicar en Instagram |

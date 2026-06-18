@@ -9,61 +9,108 @@ import httpx
 log = logging.getLogger(__name__)
 
 MIN_WIDTH = 720
-SERPAPI_BASE = "https://serpapi.com/search"
 
 
-async def search_photos(query: str, count: int = 10) -> list:
-    """Search Google Images via SerpAPI and return image metadata."""
-    key = os.getenv("SERPAPI_API_KEY")
+async def _search_pexels_photos(query: str, count: int, orientation: str) -> list:
+    key = os.getenv("PEXELS_API_KEY")
     if not key:
-        log.warning("SERPAPI_API_KEY not set — photo search unavailable")
         return []
-
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
-                SERPAPI_BASE,
-                params={
-                    "engine": "google_images",  # required by SerpAPI
-                    "q": query,
-                    "num": count * 3,
-                    "api_key": key,
-                    "safe": "active",
-                    "ijn": "0",  # first page
-                },
+                "https://api.pexels.com/v1/search",
+                headers={"Authorization": key},
+                params={"query": query, "per_page": count, "orientation": orientation},
             )
         if resp.status_code != 200:
-            log.error(f"SerpAPI HTTP {resp.status_code}: {resp.text[:200]}")
+            log.warning(f"Pexels photos HTTP {resp.status_code}")
             return []
-
-        data = resp.json()
         photos = []
-        for img in data.get("images_results", []):
-            url = img.get("original")
+        for p in resp.json().get("photos", []):
+            src = p.get("src", {})
+            url = src.get("original") or src.get("large2x") or src.get("large")
             if not url:
-                continue
-            width = img.get("original_width") or 0
-            # Only reject if we know the image is too small; accept when unknown (width=0)
-            if width and width < MIN_WIDTH:
                 continue
             photos.append({
                 "url": url,
-                "thumbnail": img.get("thumbnail"),
-                "title": img.get("title", ""),
-                "width": width,
-                "height": img.get("original_height") or 0,
+                "thumbnail": src.get("medium"),
+                "title": p.get("alt", ""),
+                "width": p.get("width", 0),
+                "height": p.get("height", 0),
             })
-            if len(photos) >= count:
-                break
-        log.info(f"SerpAPI returned {len(photos)} usable photos for query: {query!r}")
+        log.debug(f"Pexels photos: {len(photos)} for '{query}'")
         return photos
     except Exception as e:
-        log.error(f"SerpAPI search error: {e}")
+        log.warning(f"Pexels photos error: {e}")
         return []
 
 
+async def _search_pixabay_photos(query: str, count: int, orientation: str) -> list:
+    key = os.getenv("PIXABAY_API_KEY")
+    if not key:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://pixabay.com/api/",
+                params={
+                    "key": key,
+                    "q": query,
+                    "image_type": "photo",
+                    "per_page": count,
+                    "orientation": orientation,  # "vertical" or "horizontal"
+                    "safesearch": "true",
+                    "min_width": MIN_WIDTH,
+                },
+            )
+        if resp.status_code != 200:
+            log.warning(f"Pixabay photos HTTP {resp.status_code}")
+            return []
+        photos = []
+        for hit in resp.json().get("hits", []):
+            url = hit.get("largeImageURL") or hit.get("webformatURL")
+            if not url:
+                continue
+            photos.append({
+                "url": url,
+                "thumbnail": hit.get("previewURL"),
+                "title": hit.get("tags", ""),
+                "width": hit.get("imageWidth", 0),
+                "height": hit.get("imageHeight", 0),
+            })
+        log.debug(f"Pixabay photos: {len(photos)} for '{query}'")
+        return photos
+    except Exception as e:
+        log.warning(f"Pixabay photos error: {e}")
+        return []
+
+
+async def search_photos(query: str, count: int = 10, orientation: str = "portrait") -> list:
+    """Search photos from Pexels + Pixabay in parallel and interleave results."""
+    pixabay_orient = "vertical" if orientation == "portrait" else "horizontal"
+
+    pexels, pixabay = await asyncio.gather(
+        _search_pexels_photos(query, count, orientation),
+        _search_pixabay_photos(query, count, pixabay_orient),
+        return_exceptions=True,
+    )
+    pexels  = pexels  if isinstance(pexels,  list) else []
+    pixabay = pixabay if isinstance(pixabay, list) else []
+
+    # Interleave so we get variety from both sources
+    interleaved = []
+    for i in range(max(len(pexels), len(pixabay))):
+        if i < len(pexels):
+            interleaved.append(pexels[i])
+        if i < len(pixabay):
+            interleaved.append(pixabay[i])
+
+    log.info(f"Photos found: {len(pexels)} Pexels + {len(pixabay)} Pixabay for '{query}'")
+    return interleaved[:count]
+
+
 async def download_photos(photos: list, dest_dir: Path) -> list[Path]:
-    """Download photos in parallel; returns paths of successful downloads in original order."""
+    """Download photos in parallel; returns paths of successful downloads."""
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     async def _one(i: int, photo: dict) -> Optional[Path]:
@@ -106,9 +153,7 @@ def _kenburns_vf(idx: int, frames: int, out_w: int, out_h: int) -> str:
     if idx % 2 == 0:
         z_expr = f"min(zoom+{speed},1.3)"
     else:
-        # Initialize to 1.3 on first frame then gradually zoom out
         z_expr = f"if(eq(on,1),1.3,max(zoom-{speed},1.0))"
-    # Pre-scale to 2× target so zoompan has room to zoom without aliasing
     scale_w, scale_h = out_w * 2, out_h * 2
     return (
         f"scale={scale_w}:{scale_h}:force_original_aspect_ratio=increase,"
@@ -158,20 +203,19 @@ async def fetch_photo_clips(
     aspect: str = "9:16",
     on_progress=None,
 ) -> list[Path]:
-    """End-to-end: search → download → Ken Burns conversion for N photo clips.
-
-    on_progress: async callable(dict) emitting WebSocket progress events.
-    """
+    """Search → download → Ken Burns conversion. Uses Pexels + Pixabay Photos APIs."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     originals_dir = dest_dir / "originals"
     originals_dir.mkdir(exist_ok=True)
+
+    orientation = "portrait" if aspect == "9:16" else "landscape"
 
     async def _emit(pct: int, msg: str = ""):
         if on_progress:
             await on_progress({"type": "progress", "task_type": "video", "progress": pct, "msg": msg})
 
-    await _emit(5, "Buscando fotos en internet...")
-    photos = await search_photos(query, count=count + 4)
+    await _emit(5, "Buscando fotos (Pexels + Pixabay)...")
+    photos = await search_photos(query, count=count + 4, orientation=orientation)
     if not photos:
         log.warning(f"No photos found for '{query}'")
         return []

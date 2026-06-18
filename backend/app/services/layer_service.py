@@ -198,11 +198,11 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             if photo_clips:
                 clips = photo_clips
             else:
-                # Fallback: SERPAPI_API_KEY not set or search returned nothing
-                log.warning("Photo search unavailable — falling back to Pexels")
+                # Fallback: Pexels/Pixabay keys not set or returned no photos
+                log.warning("Photo search returned nothing — falling back to Pexels video clips")
                 await manager.send_progress(project_id, {
                     "type": "progress", "task_type": "video", "progress": 20,
-                    "msg": "Sin SERPAPI_API_KEY — usando Pexels como alternativa",
+                    "msg": "Sin fotos disponibles — usando clips de video de Pexels",
                 })
                 pexels_urls = await fetch_pexels_clips(pexels_query, 6)
                 async with httpx.AsyncClient() as client:
