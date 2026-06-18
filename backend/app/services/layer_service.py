@@ -136,10 +136,15 @@ async def fetch_pexels_clips(query: str, count: int = 8) -> list:
         data = resp.json()
         urls = []
         for v in data.get("videos", []):
-            files = v.get("video_files", [])
-            # Prefer HD, fall back to best available resolution
+            files = [f for f in v.get("video_files", []) if f.get("link", "").endswith(".mp4")]
+            # Prefer HD (≤1920px). Avoid 4K/UHD — too large for server processing.
             hd = next((f for f in files if f.get("quality") == "hd"), None)
-            best = hd or max(files, key=lambda f: f.get("width", 0) * f.get("height", 0), default=None)
+            reasonable = next(
+                (f for f in sorted(files, key=lambda f: f.get("width", 0) * f.get("height", 0), reverse=True)
+                 if max(f.get("width", 0), f.get("height", 0)) <= 1920),
+                None
+            )
+            best = hd or reasonable or (files[0] if files else None)
             if best and best.get("link"):
                 urls.append(best["link"])
         return urls

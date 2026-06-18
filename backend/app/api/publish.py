@@ -1,65 +1,121 @@
-from fastapi import APIRouter, HTTPException
-from pathlib import Path
-import os
+import json
+from datetime import datetime
+
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.orm import Session
+
+from app.auth import get_current_user
+from app.database import get_db, ScheduledPost
+from app.services import publish_service
 
 router = APIRouter()
 
+
 @router.post("/{project_id}/youtube")
 async def publish_youtube(project_id: str, body: dict):
-    output_path = Path("projects") / project_id / "output" / "final.mp4"
-    if not output_path.exists():
-        raise HTTPException(status_code=404, detail="Render not found. Run render first.")
+    result = await publish_service.publish_youtube(project_id, title=body.get("title", ""), **body)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    return result
 
-    project_from_service = __import__(
-        "app.services.project_service", fromlist=["get_project"]
-    ).get_project(project_id)
 
-    title = body.get("title") or project_from_service["title"]
-    description = body.get("description", "")
-    tags = body.get("tags", ["Mundial2026", "Fútbol", "Copa del Mundo"])
-    privacy = body.get("privacy", "public")
+@router.post("/{project_id}/tiktok")
+async def publish_tiktok(project_id: str, body: dict):
+    result = await publish_service.publish_tiktok(project_id, title=body.get("title", ""), **body)
+    return result
 
-    try:
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
-        from google.oauth2.credentials import Credentials
 
-        creds_data = {
-            "token": os.getenv("YOUTUBE_TOKEN"),
-            "refresh_token": os.getenv("YOUTUBE_REFRESH_TOKEN"),
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_id": os.getenv("YOUTUBE_CLIENT_ID"),
-            "client_secret": os.getenv("YOUTUBE_CLIENT_SECRET"),
-        }
-        creds = Credentials(**creds_data)
-        youtube = build("youtube", "v3", credentials=creds)
+@router.post("/{project_id}/instagram")
+async def publish_instagram(project_id: str, body: dict):
+    result = await publish_service.publish_instagram(
+        project_id, caption=body.get("caption", body.get("title", "")), **body
+    )
+    return result
 
-        request = youtube.videos().insert(
-            part="snippet,status",
-            body={
-                "snippet": {
-                    "title": title,
-                    "description": description,
-                    "tags": tags,
-                    "categoryId": "17",
-                },
-                "status": {"privacyStatus": privacy},
-            },
-            media_body=MediaFileUpload(str(output_path), chunksize=-1, resumable=True),
-        )
-        response = request.execute()
-        video_id = response["id"]
-        return {
-            "status": "published",
-            "video_id": video_id,
-            "url": f"https://youtube.com/watch?v={video_id}",
-        }
 
-    except ImportError:
-        return {
-            "status": "mock",
-            "message": "google-api-python-client not installed. Install to enable real publishing.",
-            "would_publish": str(output_path),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@router.post("/{project_id}/multi")
+async def publish_multi(project_id: str, body: dict):
+    platforms = body.get("platforms", [])
+    if not platforms:
+        raise HTTPException(status_code=400, detail="No platforms specified")
+    meta = {k: v for k, v in body.items() if k != "platforms"}
+    results = await publish_service.publish_multi(project_id, platforms, meta)
+    return {"results": results}
+
+
+@router.post("/{project_id}/thumbnail")
+async def generate_thumbnail(project_id: str, body: dict = None):
+    body = body or {}
+    timestamp = body.get("timestamp", 2.0)
+    path = await publish_service.generate_thumbnail(project_id, timestamp)
+    return {"path": str(path), "size_bytes": path.stat().st_size}
+
+
+@router.post("/{project_id}/schedule")
+async def schedule_post(
+    project_id: str,
+    body: dict,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    platform = body.get("platform")
+    scheduled_at = body.get("scheduled_at")
+    if not platform or not scheduled_at:
+        raise HTTPException(status_code=400, detail="platform and scheduled_at required")
+
+    post = ScheduledPost(
+        project_id=project_id,
+        platform=platform,
+        scheduled_at=datetime.fromisoformat(scheduled_at),
+        meta=json.dumps({k: v for k, v in body.items() if k not in ("platform", "scheduled_at")}),
+    )
+    db.add(post)
+    db.commit()
+    return {
+        "id": post.id,
+        "platform": post.platform,
+        "scheduled_at": post.scheduled_at.isoformat(),
+        "status": post.status,
+    }
+
+
+@router.get("/{project_id}/schedule")
+async def list_scheduled(
+    project_id: str,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    posts = db.query(ScheduledPost).filter(
+        ScheduledPost.project_id == project_id
+    ).order_by(ScheduledPost.scheduled_at).all()
+    return {
+        "posts": [
+            {
+                "id": p.id,
+                "platform": p.platform,
+                "scheduled_at": p.scheduled_at.isoformat(),
+                "status": p.status,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+            }
+            for p in posts
+        ]
+    }
+
+
+@router.delete("/{project_id}/schedule/{post_id}")
+async def cancel_scheduled(
+    project_id: str,
+    post_id: int,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    post = db.query(ScheduledPost).filter(
+        ScheduledPost.id == post_id, ScheduledPost.project_id == project_id
+    ).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Scheduled post not found")
+    if post.status != "pending":
+        raise HTTPException(status_code=400, detail="Can only cancel pending posts")
+    db.delete(post)
+    db.commit()
+    return {"ok": True}
