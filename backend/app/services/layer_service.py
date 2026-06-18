@@ -122,21 +122,28 @@ async def generate_subtitles(project_id: str) -> Path:
 
 async def fetch_pexels_clips(query: str, count: int = 8) -> list:
     pexels_key = os.getenv("PEXELS_API_KEY")
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            "https://api.pexels.com/videos/search",
-            headers={"Authorization": pexels_key},
-            params={"query": query, "per_page": count, "orientation": "portrait"},
-            timeout=15,
-        )
-    data = resp.json()
-    urls = []
-    for v in data.get("videos", []):
-        for f in v.get("video_files", []):
-            if f.get("quality") == "hd":
-                urls.append(f["link"])
-                break
-    return urls
+    if not pexels_key:
+        log.warning("PEXELS_API_KEY not set — skipping Pexels video clips")
+        return []
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.pexels.com/videos/search",
+                headers={"Authorization": pexels_key},
+                params={"query": query, "per_page": count, "orientation": "portrait"},
+                timeout=15,
+            )
+        data = resp.json()
+        urls = []
+        for v in data.get("videos", []):
+            for f in v.get("video_files", []):
+                if f.get("quality") == "hd":
+                    urls.append(f["link"])
+                    break
+        return urls
+    except Exception as e:
+        log.warning(f"Pexels clips error: {e}")
+        return []
 
 
 async def _get_audio_duration(path: Path) -> float:
@@ -252,7 +259,7 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
 
     if not clips:
         project_service.update_layer_status(project_id, "video", LayerStatus.error, {
-            "error": "No clips found"
+            "error": "Sin clips disponibles. Configura PEXELS_API_KEY o PIXABAY_API_KEY en Railway.",
         })
         return None
 
