@@ -13,6 +13,7 @@ MIN_WIDTH = 720
 
 async def _search_pexels_photos(query: str, count: int, orientation: str) -> list:
     key = os.getenv("PEXELS_API_KEY")
+    log.info(f"[photo] Pexels Photos key={'SET' if key else 'MISSING'} query={query!r}")
     if not key:
         return []
     try:
@@ -204,6 +205,7 @@ async def fetch_photo_clips(
     on_progress=None,
 ) -> list[Path]:
     """Search → download → Ken Burns conversion. Uses Pexels + Pixabay Photos APIs."""
+    log.info(f"[photo] fetch_photo_clips called: query={query!r} count={count} aspect={aspect}")
     dest_dir.mkdir(parents=True, exist_ok=True)
     originals_dir = dest_dir / "originals"
     originals_dir.mkdir(exist_ok=True)
