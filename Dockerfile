@@ -24,6 +24,6 @@ COPY --from=frontend-build /app/frontend/dist ./static
 
 RUN mkdir -p projects clips music
 
-EXPOSE 10000
+EXPOSE ${PORT:-8000}
 
-CMD ["/usr/local/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}

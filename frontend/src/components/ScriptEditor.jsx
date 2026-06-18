@@ -6,7 +6,7 @@ const LLM_PROVIDERS = [
   { key: "openai", label: "GPT" },
 ]
 
-export default function ScriptEditor({ projectId, script, onClose, onSaved }) {
+export default function ScriptEditor({ projectId, script, topic, match, matchDate, onClose, onSaved }) {
   const [text, setText] = useState(script || "")
   const [generating, setGenerating] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -14,6 +14,7 @@ export default function ScriptEditor({ projectId, script, onClose, onSaved }) {
   const [template, setTemplate] = useState("free")
   const [templates, setTemplates] = useState({})
   const [timestamps, setTimestamps] = useState([])
+  const [error, setError] = useState(null)
 
   useEffect(() => {
     fetch("/api/sources/script/templates")
@@ -39,14 +40,23 @@ export default function ScriptEditor({ projectId, script, onClose, onSaved }) {
 
   const handleGenerate = async () => {
     setGenerating(true)
-    const res = await fetch("/api/sources/script/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic: text || "video", provider, template }),
-    })
-    const data = await res.json()
-    setText(data.script || "")
-    if (data.timestamps) setTimestamps(data.timestamps)
+    setError(null)
+    try {
+      const res = await fetch("/api/sources/script/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic: topic || "video del Mundial 2026", provider, template, match, match_date: matchDate }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setError(data.detail || `Error ${res.status}`)
+      } else {
+        setText(data.script || "")
+        if (data.timestamps) setTimestamps(data.timestamps)
+      }
+    } catch (e) {
+      setError("Error de conexión al generar el guión")
+    }
     setGenerating(false)
   }
 
@@ -126,6 +136,12 @@ export default function ScriptEditor({ projectId, script, onClose, onSaved }) {
             {generating ? "⏳ Generando..." : "⚡ Generar con IA"}
           </button>
         </div>
+
+        {error && (
+          <div className="mb-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+            {error}
+          </div>
+        )}
 
         {/* Editor + Timestamps side by side on desktop */}
         <div className="flex gap-3 flex-1 min-h-0">

@@ -4,6 +4,7 @@ import ScriptEditor from "./ScriptEditor"
 import VideoPreview from "./VideoPreview"
 import Timeline from "./Timeline"
 import RenderHistory from "./RenderHistory"
+import PublishPanel from "./PublishPanel"
 import useProjectSocket from "../hooks/useProjectSocket"
 import { apiJson } from "../api"
 
@@ -19,9 +20,9 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
   const [project, setProject] = useState(initialProject)
   const [rendering, setRendering] = useState(false)
   const [outputUrl, setOutputUrl] = useState(null)
-  const [publishing, setPublishing] = useState(false)
   const [showScript, setShowScript] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
+  const [showPublish, setShowPublish] = useState(false)
   const [layerDurations, setLayerDurations] = useState(null)
 
   const { connected, lastEvent, progress, taskType, isRunning, isDone, isFailed } = useProjectSocket(project.id)
@@ -68,17 +69,6 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
     }, 5000)
   }
 
-  const handlePublishYoutube = async () => {
-    setPublishing(true)
-    const data = await apiJson(`/api/publish/${project.id}/youtube`, {
-      method: "POST",
-      body: { title: project.title },
-    })
-    setPublishing(false)
-    if (data.url) alert(`Publicado: ${data.url}`)
-    else alert(data.message || "Error al publicar")
-  }
-
   const handleClearRenders = async () => {
     if (!confirm("¿Limpiar todos los renders de este proyecto?")) return
     await apiJson(`/api/projects/${project.id}/renders`, { method: "DELETE" })
@@ -118,6 +108,7 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
         <div className="flex gap-2 items-center shrink-0 flex-wrap justify-end">
           <button onClick={() => setShowScript(true)} className="btn-outline">✏️ Guión</button>
           <button onClick={() => setShowHistory(true)} className="btn-outline">📂 Historial</button>
+          <button onClick={() => setShowPublish(true)} className="btn-outline">📤 Publicar</button>
           <button onClick={handleClearRenders} className="btn-outline text-red-500 border-red-200 hover:bg-red-50">
             🗑 Renders
           </button>
@@ -183,8 +174,8 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
           </div>
           <div className="flex gap-2">
             <a href={outputUrl} download className="btn-outline no-underline text-[13px]">⬇ Descargar</a>
-            <button onClick={handlePublishYoutube} disabled={publishing} className="btn-outline">
-              {publishing ? "Publicando..." : "▶ YouTube"}
+            <button onClick={() => setShowPublish(true)} className="btn-outline">
+              📤 Publicar
             </button>
           </div>
         </div>
@@ -212,6 +203,9 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
         <ScriptEditor
           projectId={project.id}
           script={project.config?.script}
+          topic={project.topic || project.title}
+          match={project.match}
+          matchDate={project.match_date}
           onClose={() => setShowScript(false)}
           onSaved={(script) => setProject(p => ({
             ...p, config: { ...p.config, script }
@@ -223,6 +217,14 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
         <RenderHistory
           projectId={project.id}
           onClose={() => setShowHistory(false)}
+        />
+      )}
+
+      {showPublish && (
+        <PublishPanel
+          projectId={project.id}
+          title={project.title}
+          onClose={() => setShowPublish(false)}
         />
       )}
     </div>

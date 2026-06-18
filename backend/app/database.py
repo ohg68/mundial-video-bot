@@ -68,6 +68,32 @@ class TaskRecord(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ShareLink(Base):
+    __tablename__ = "share_links"
+    id = Column(String(16), primary_key=True)
+    project_id = Column(String(8), ForeignKey("projects.id"), nullable=False)
+    token = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    views = Column(Integer, default=0)
+
+    project = relationship("Project")
+
+
+class ScheduledPost(Base):
+    __tablename__ = "scheduled_posts"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(String(8), ForeignKey("projects.id"), nullable=False)
+    platform = Column(String(20), nullable=False)
+    scheduled_at = Column(DateTime, nullable=False)
+    status = Column(String(20), default="pending")
+    meta = Column(Text, default="{}")
+    result = Column(Text, default=None)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    project = relationship("Project")
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
 

@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from app.api import projects, layers, render, publish, sources
+from app.api import projects, layers, render, publish, sources, share
 from app.auth import router as auth_router
 from app.database import init_db
 from app.migrate import migrate_json_to_db
@@ -33,6 +33,7 @@ app.include_router(layers.router, prefix="/api/layers", tags=["layers"])
 app.include_router(render.router, prefix="/api/render", tags=["render"])
 app.include_router(publish.router, prefix="/api/publish", tags=["publish"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
+app.include_router(share.router, prefix="/api/share", tags=["share"])
 
 app.add_api_websocket_route("/ws/{project_id}", websocket_endpoint)
 
@@ -40,6 +41,18 @@ app.add_api_websocket_route("/ws/{project_id}", websocket_endpoint)
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "LayerCut"}
+
+
+@app.get("/share/{token}")
+async def share_redirect(token: str):
+    from fastapi import Request
+    from app.api.share import view_share
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        return await view_share(token, db)
+    finally:
+        db.close()
 
 
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -54,7 +67,7 @@ if os.path.exists(static_dir):
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
-        if full_path.startswith("api") or full_path.startswith("ws") or full_path == "health":
+        if full_path.startswith(("api", "ws", "share")) or full_path == "health":
             from fastapi import HTTPException
             raise HTTPException(status_code=404)
         return FileResponse(os.path.join(static_dir, "index.html"))

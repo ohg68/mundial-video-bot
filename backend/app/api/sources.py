@@ -109,9 +109,14 @@ async def generate_script(body: dict = Body(...)):
     match = body.get("match")
     match_date = body.get("match_date")
 
-    script = await llm_service.generate_script(
-        topic, provider, template, language, match, match_date,
-    )
+    try:
+        script = await llm_service.generate_script(
+            topic, provider, template, language, match, match_date,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM error ({provider}): {str(e)}")
     timestamps = llm_service.estimate_timestamps(script)
     return {"script": script, "timestamps": timestamps, "provider": provider, "template": template}
 
