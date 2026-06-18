@@ -136,10 +136,12 @@ async def fetch_pexels_clips(query: str, count: int = 8) -> list:
         data = resp.json()
         urls = []
         for v in data.get("videos", []):
-            for f in v.get("video_files", []):
-                if f.get("quality") == "hd":
-                    urls.append(f["link"])
-                    break
+            files = v.get("video_files", [])
+            # Prefer HD, fall back to best available resolution
+            hd = next((f for f in files if f.get("quality") == "hd"), None)
+            best = hd or max(files, key=lambda f: f.get("width", 0) * f.get("height", 0), default=None)
+            if best and best.get("link"):
+                urls.append(best["link"])
         return urls
     except Exception as e:
         log.warning(f"Pexels clips error: {e}")
