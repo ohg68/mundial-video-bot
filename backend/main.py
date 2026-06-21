@@ -17,9 +17,19 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     init_db()
     migrate_json_to_db()
     await task_queue.start()
+
+    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if telegram_token:
+        from app.telegram_bot import start_polling
+        asyncio.create_task(start_polling(telegram_token))
+        logging.getLogger(__name__).info("Telegram bot iniciado")
+    else:
+        logging.getLogger(__name__).info("TELEGRAM_BOT_TOKEN no configurado — bot desactivado")
+
     yield
     await task_queue.stop()
 
