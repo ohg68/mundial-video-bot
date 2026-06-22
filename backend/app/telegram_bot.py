@@ -88,7 +88,9 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
 
         await bot.send_message(
             chat_id,
-            f"📋 Proyecto `{project_id}` creado\n\n✍️ *Generando guión con IA...*",
+            f"📋 Proyecto creado\n\n"
+            f"*ID: `{project_id}`* ← copia esto\n\n"
+            f"✍️ *Generando guión con IA...*",
             parse_mode="Markdown",
         )
 
@@ -133,6 +135,17 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
         caption = f"🎬 *{title}*\n_{topic}_\n\n`ID: {project_id}`"
         await _send_video(bot, chat_id, output, caption=caption)
 
+        # 7. Instrucciones post-entrega
+        await bot.send_message(
+            chat_id,
+            f"✅ ¡Video listo!\n\n"
+            f"*Próximos pasos:*\n"
+            f"• `/capas {project_id}` — editar capas\n"
+            f"• `/guion {project_id}` — editar guión\n"
+            f"• `/ultimos` — ver últimos 10 proyectos",
+            parse_mode="Markdown",
+        )
+
     except Exception as e:
         log.error(f"Pipeline error [chat={chat_id}]: {e}", exc_info=True)
         pid_info = f" (proyecto `{project_id}`)" if project_id else ""
@@ -149,15 +162,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 *LayerCut Bot — Mundial 2026*\n\n"
         "Genera videos automáticamente sobre el Mundial.\n\n"
-        "*Comandos principales:*\n"
-        "• /nuevo — Crear y recibir un video\n"
-        "• /listar — Ver tus proyectos\n"
-        "• /descargar `ID` — Recibir render de un proyecto\n"
-        "• /estado `ID` — Ver estado de un proyecto\n\n"
-        "*Edición de capas y guión:*\n"
-        "• /capas `ID` — Ver y editar video/audio/subtítulos/música\n"
-        "• /guion `ID` — Leer y editar el guión\n\n"
-        "• /cancelar — Cancelar operación actual",
+        "*Crear y gestionar:*\n"
+        "• /nuevo — Crear nuevo video\n"
+        "• /ultimos — Ver últimos proyectos (IDs copiables)\n"
+        "• /descargar `ID` — Recibir render\n"
+        "• /estado `ID` — Ver estado detallado\n\n"
+        "*Edición:*\n"
+        "• /capas `ID` — Editar capas (video/audio/subs)\n"
+        "• /guion `ID` — Editar guión\n\n"
+        "Tip: Copia el ID que aparece al crear un video",
         parse_mode="Markdown",
     )
 
@@ -228,6 +241,33 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Operación cancelada.")
     return ConversationHandler.END
+
+
+async def cmd_ultimos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostrar últimos 10 proyectos con IDs copiables."""
+    projects = project_service.list_projects()
+    if not projects:
+        await update.message.reply_text(
+            "No hay proyectos aún. Usa /nuevo para crear uno."
+        )
+        return
+
+    lines = ["*Últimos proyectos (copia el ID):*\n"]
+    for p in projects[:10]:
+        layers = p.get("layers", {})
+        video = layers.get("video", "empty")
+        audio = layers.get("audio", "empty")
+        icons = ("✅" if video == "ready" else "⏳") + ("🔊" if audio == "ready" else "")
+
+        # Formato: ID copiable + título
+        lines.append(f"{icons} `{p['id']}`\n   _{p['title']}_")
+
+    lines.append("\n*Usa:*\n")
+    lines.append("• `/capas ID` — editar capas\n")
+    lines.append("• `/guion ID` — editar guión\n")
+    lines.append("• `/estado ID` — ver estado")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -807,6 +847,7 @@ def build_app(token: str) -> Application:
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("listar", cmd_listar))
+    application.add_handler(CommandHandler("ultimos", cmd_ultimos))
     application.add_handler(CommandHandler("estado", cmd_estado))
     application.add_handler(CommandHandler("descargar", cmd_descargar))
     application.add_handler(CommandHandler("capas", cmd_capas))
