@@ -342,7 +342,11 @@ async def cmd_guion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     config = meta.get("config", {})
-    script = config.get("script", "(sin guión aún)")
+    # Script puede ser None o una cadena vacía
+    script = config.get("script") if isinstance(config, dict) else None
+
+    if not script:
+        script = "(sin guión aún — genera uno con 🤖)"
 
     # Mostrar guión con opción de editar
     preview = script[:800] if len(script) > 800 else script
@@ -353,11 +357,18 @@ async def cmd_guion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🤖 Regenerar con IA", callback_data=f"regen_script_{project_id}")],
     ]
 
-    await update.message.reply_text(
-        f"📝 *Guión: {meta['title']}*\n\n```\n{preview}{truncated}\n```",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown",
-    )
+    try:
+        await update.message.reply_text(
+            f"📝 *Guión: {meta['title']}*\n\n```\n{preview}{truncated}\n```",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        log.error(f"Error en cmd_guion: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Error: {str(e)[:100]}",
+            parse_mode="Markdown",
+        )
 
 
 async def on_edit_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
