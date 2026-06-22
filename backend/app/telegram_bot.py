@@ -28,13 +28,15 @@ from app.models.project import (
     VideoSource,
 )
 from app.services import layer_service, project_service, render_service
+from app.database import SessionLocal, Project
 
 log = logging.getLogger(__name__)
 
 # ── Conversation states ────────────────────────────────────────────────────────
 (WAITING_TITLE, WAITING_TOPIC, WAITING_SOURCE,
  WAITING_LAYER_ACTION, WAITING_AUDIO_VOICE, WAITING_AUDIO_SPEED,
- WAITING_VIDEO_SOURCE, WAITING_FILE_UPLOAD) = range(8)
+ WAITING_VIDEO_SOURCE, WAITING_FILE_UPLOAD,
+ WAITING_SCRIPT_EDIT) = range(9)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -152,8 +154,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /listar — Ver tus proyectos\n"
         "• /descargar `ID` — Recibir render de un proyecto\n"
         "• /estado `ID` — Ver estado de un proyecto\n\n"
-        "*Edición de capas:*\n"
-        "• /capas `ID` — Ver y editar video/audio/subtítulos/música\n\n"
+        "*Edición de capas y guión:*\n"
+        "• /capas `ID` — Ver y editar video/audio/subtítulos/música\n"
+        "• /guion `ID` — Leer y editar el guión\n\n"
         "• /cancelar — Cancelar operación actual",
         parse_mode="Markdown",
     )
@@ -321,6 +324,138 @@ async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = f"🎬 *{title}*\n_{topic}_\n\n`ID: {project_id}`"
     await _send_video(context.application.bot, update.effective_chat.id, output, caption)
     await msg.delete()
+
+
+async def cmd_guion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ver y editar el guión de un proyecto."""
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Uso: `/guion ID_proyecto`", parse_mode="Markdown"
+        )
+        return
+
+    project_id = args[0]
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado.", parse_mode="Markdown")
+        return
+
+    config = meta.get("config", {})
+    script = config.get("script", "(sin guión aún)")
+
+    # Mostrar guión con opción de editar
+    preview = script[:800] if len(script) > 800 else script
+    truncated = "..." if len(script) > 800 else ""
+
+    keyboard = [
+        [InlineKeyboardButton("✏️ Editar guión", callback_data=f"edit_script_{project_id}")],
+        [InlineKeyboardButton("🤖 Regenerar con IA", callback_data=f"regen_script_{project_id}")],
+    ]
+
+    await update.message.reply_text(
+        f"📝 *Guión: {meta['title']}*\n\n```\n{preview}{truncated}\n```",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def on_edit_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Iniciar edición de guión."""
+    query = update.callback_query
+    await query.answer()
+
+    project_id = query.data.split("_")[-1]
+    context.user_data["edit_script_project"] = project_id
+
+    await query.edit_message_text(
+        "✏️ *Editar guión*\n\n"
+        "Envía el nuevo guión (máx 2000 caracteres). "
+        "Cuando termines, envía /listo para guardar.",
+        parse_mode="Markdown",
+    )
+    return WAITING_SCRIPT_EDIT
+
+
+async def on_script_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibir y guardar nuevo guión."""
+    script = update.message.text.strip()
+    project_id = context.user_data.get("edit_script_project")
+
+    if not project_id:
+        await update.message.reply_text("❌ Error: proyecto no encontrado.")
+        return ConversationHandler.END
+
+    if len(script) > 2000:
+        await update.message.reply_text("❌ El guión es muy largo (máx 2000 caracteres).")
+        return WAITING_SCRIPT_EDIT
+
+    # Guardar nuevo guión
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await update.message.reply_text("❌ Proyecto no encontrado.")
+        return ConversationHandler.END
+
+    config_dict = meta.get("config", {})
+    config_dict["script"] = script
+
+    # Actualizar en DB
+    import json
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if project:
+            project.config = json.dumps(config_dict, ensure_ascii=False)
+            db.commit()
+    finally:
+        db.close()
+
+    await update.message.reply_text(
+        f"✅ Guión guardado ({len(script)} caracteres)\n\n"
+        f"💡 Ahora puedes:\n"
+        f"• `/capas {project_id}` — editar capas\n"
+        f"• `/render {project_id}` — renderizar con nuevo guión",
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+async def on_regen_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Regenerar guión con IA."""
+    query = update.callback_query
+    await query.answer()
+
+    project_id = query.data.split("_")[-1]
+    chat_id = query.message.chat_id
+
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado.")
+        return
+
+    config = ProjectConfig(**meta.get("config", {}))
+    await query.edit_message_text("🤖 Regenerando guión con IA...")
+
+    asyncio.create_task(_regen_script(context.application.bot, chat_id, project_id, config))
+
+
+async def _regen_script(bot, chat_id: int, project_id: str, config):
+    """Regenerar script y notificar."""
+    try:
+        script = await layer_service.generate_script(project_id, config)
+        preview = script[:200].replace("\n", " ")
+        await bot.send_message(
+            chat_id,
+            f"✅ Guión regenerado:\n\n_{preview}..._\n\n"
+            f"`/capas {project_id}` para editar más capas",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await bot.send_message(
+            chat_id,
+            f"❌ Error regenerando guión: {str(e)[:150]}",
+            parse_mode="Markdown",
+        )
 
 
 async def cmd_capas(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -664,6 +799,7 @@ def build_app(token: str) -> Application:
     application.add_handler(CommandHandler("estado", cmd_estado))
     application.add_handler(CommandHandler("descargar", cmd_descargar))
     application.add_handler(CommandHandler("capas", cmd_capas))
+    application.add_handler(CommandHandler("guion", cmd_guion))
 
     # Capas management
     application.add_handler(CallbackQueryHandler(on_layer_selected, pattern="^layer_"))
@@ -675,6 +811,23 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_regen_subs, pattern="^regen_subs_"))
     application.add_handler(CallbackQueryHandler(on_setvoice, pattern="^setvoice_"))
     application.add_handler(CallbackQueryHandler(on_back_capas, pattern="^back_capas_"))
+
+    # Script management
+    application.add_handler(CallbackQueryHandler(on_edit_script, pattern="^edit_script_"))
+    application.add_handler(CallbackQueryHandler(on_regen_script, pattern="^regen_script_"))
+
+    # Script editing conversation
+    script_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(on_edit_script, pattern="^edit_script_")],
+        states={
+            WAITING_SCRIPT_EDIT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, on_script_text),
+                CommandHandler("listo", cmd_cancelar),
+            ],
+        },
+        fallbacks=[CommandHandler("cancelar", cmd_cancelar)],
+    )
+    application.add_handler(script_conv)
 
     application.add_handler(conv)
 
