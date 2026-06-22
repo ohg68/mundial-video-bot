@@ -32,7 +32,9 @@ from app.services import layer_service, project_service, render_service
 log = logging.getLogger(__name__)
 
 # ── Conversation states ────────────────────────────────────────────────────────
-WAITING_TITLE, WAITING_TOPIC, WAITING_SOURCE = range(3)
+(WAITING_TITLE, WAITING_TOPIC, WAITING_SOURCE,
+ WAITING_LAYER_ACTION, WAITING_AUDIO_VOICE, WAITING_AUDIO_SPEED,
+ WAITING_VIDEO_SOURCE, WAITING_FILE_UPLOAD) = range(8)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -145,11 +147,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 *LayerCut Bot — Mundial 2026*\n\n"
         "Genera videos automáticamente sobre el Mundial.\n\n"
-        "*Comandos:*\n"
+        "*Comandos principales:*\n"
         "• /nuevo — Crear y recibir un video\n"
         "• /listar — Ver tus proyectos\n"
         "• /descargar `ID` — Recibir render de un proyecto\n"
-        "• /estado `ID` — Ver estado de un proyecto\n"
+        "• /estado `ID` — Ver estado de un proyecto\n\n"
+        "*Edición de capas:*\n"
+        "• /capas `ID` — Ver y editar video/audio/subtítulos/música\n\n"
         "• /cancelar — Cancelar operación actual",
         parse_mode="Markdown",
     )
@@ -319,6 +323,327 @@ async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.delete()
 
 
+async def cmd_capas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostrar y editar capas individuales de un proyecto."""
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Uso: `/capas ID_proyecto`", parse_mode="Markdown"
+        )
+        return
+
+    project_id = args[0]
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado.", parse_mode="Markdown")
+        return
+
+    layers = meta.get("layers", {})
+    icons = {"ready": "✅", "pending": "⏳", "error": "❌", "empty": "⬜"}
+
+    keyboard = []
+    for layer in ("video", "audio", "subtitles", "music", "overlay"):
+        st = layers.get(layer, "empty")
+        icon = icons.get(st, "?")
+        keyboard.append([InlineKeyboardButton(f"{icon} {layer.capitalize()}", callback_data=f"layer_{layer}_{project_id}")])
+
+    await update.message.reply_text(
+        f"🎬 *Capas de {meta['title']}*\n`{project_id}`\n\nSelecciona una capa para ver opciones:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def on_layer_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostrar opciones para una capa seleccionada."""
+    query = update.callback_query
+    await query.answer()
+
+    data_parts = query.data.split("_")
+    layer = data_parts[1]
+    project_id = "_".join(data_parts[2:])
+
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado.")
+        return
+
+    layers = meta.get("layers", {})
+    info = meta.get("layer_info", {})
+    st = layers.get(layer, "empty")
+    li = info.get(layer, {})
+
+    # Descripción de la capa
+    desc = f"*{layer.upper()}* — Estado: **{st}**"
+    if layer == "audio" and li.get("voice"):
+        desc += f"\nVoz: _{li.get('voice')}_"
+    elif layer == "video" and li.get("clips"):
+        desc += f"\nClips: {li.get('clips')}, Fuente: _{li.get('source')}_"
+    elif st == "error":
+        desc += f"\n⚠️ {li.get('error', '')[:80]}"
+
+    # Botones de acción
+    keyboard = []
+    if st != "empty":
+        keyboard.append([InlineKeyboardButton(f"📥 Descargar {layer}", callback_data=f"dl_{layer}_{project_id}")])
+
+    if layer == "audio":
+        keyboard.append([InlineKeyboardButton("🎙️ Editar voz/velocidad", callback_data=f"edit_audio_{project_id}")])
+        keyboard.append([InlineKeyboardButton("🔄 Regenerar audio", callback_data=f"regen_audio_{project_id}")])
+    elif layer == "video":
+        keyboard.append([InlineKeyboardButton("🎬 Cambiar fuente", callback_data=f"edit_video_{project_id}")])
+        keyboard.append([InlineKeyboardButton("🔄 Regenerar video", callback_data=f"regen_video_{project_id}")])
+    elif layer == "subtitles":
+        keyboard.append([InlineKeyboardButton("✏️ Regenerar subtítulos", callback_data=f"regen_subs_{project_id}")])
+    else:
+        keyboard.append([InlineKeyboardButton("📤 Subir archivo", callback_data=f"upload_{layer}_{project_id}")])
+
+    keyboard.append([InlineKeyboardButton("◀️ Volver", callback_data=f"back_capas_{project_id}")])
+
+    await query.edit_message_text(
+        desc,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def on_layer_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Descargar una capa específica."""
+    query = update.callback_query
+    await query.answer()
+
+    data_parts = query.data.split("_")
+    layer = data_parts[1]
+    project_id = "_".join(data_parts[2:])
+
+    LAYER_FILES = {
+        "video": "video.mp4",
+        "audio": "narration.mp3",
+        "music": "music.mp3",
+        "subtitles": "subtitles.srt",
+        "overlay": "overlay.png",
+    }
+
+    path = Path("projects") / project_id / layer / LAYER_FILES.get(layer, "")
+    if not path.exists():
+        await query.edit_message_text(f"❌ Archivo de {layer} no encontrado.")
+        return
+
+    await query.edit_message_text(f"📤 Enviando {layer}...")
+    chat_id = query.message.chat_id
+    try:
+        with open(path, "rb") as f:
+            await context.application.bot.send_document(
+                chat_id, f,
+                filename=path.name,
+                caption=f"`{layer}` de proyecto `{project_id}`",
+                parse_mode="Markdown",
+                read_timeout=120,
+                write_timeout=120,
+            )
+    except Exception as e:
+        await context.application.bot.send_message(
+            chat_id,
+            f"❌ Error al enviar {layer}: {str(e)[:100]}",
+            parse_mode="Markdown",
+        )
+
+
+async def on_edit_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu para editar audio (voz, velocidad)."""
+    query = update.callback_query
+    await query.answer()
+
+    project_id = query.data.split("_")[-1]
+    context.user_data["edit_project"] = project_id
+
+    keyboard = [
+        [InlineKeyboardButton("🎙️ Cambiar voz", callback_data=f"voice_menu_{project_id}")],
+        [InlineKeyboardButton("⏱️ Cambiar velocidad (1.0 = normal)", callback_data=f"speed_input_{project_id}")],
+        [InlineKeyboardButton("◀️ Volver", callback_data=f"back_capas_{project_id}")],
+    ]
+    await query.edit_message_text(
+        "🎙️ *Editar audio*\n\n¿Qué quieres cambiar?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def on_voice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Selector de voces."""
+    query = update.callback_query
+    await query.answer()
+
+    project_id = query.data.split("_")[-1]
+    context.user_data["edit_project"] = project_id
+
+    voices = [
+        ("es-ES-AlvaroNeural", "🇪🇸 Alvaro (español)"),
+        ("es-ES-ElviraNeural", "🇪🇸 Elvira (español)"),
+        ("pt-PT-DuarteNeural", "🇵🇹 Duarte (portugués)"),
+        ("pt-PT-InesNeural", "🇵🇹 Inés (portugués)"),
+    ]
+
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"setvoice_{voice_id}_{project_id}")]
+        for voice_id, label in voices
+    ]
+    keyboard.append([InlineKeyboardButton("◀️ Volver", callback_data=f"edit_audio_{project_id}")])
+
+    await query.edit_message_text(
+        "🎙️ Elige una voz:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def on_regen_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Regenerar audio con configuración actual."""
+    query = update.callback_query
+    await query.answer()
+
+    project_id = query.data.split("_")[-1]
+    chat_id = query.message.chat_id
+
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado.")
+        return
+
+    config = ProjectConfig(**meta.get("config", {}))
+    await query.edit_message_text("🎙️ Regenerando audio...")
+
+    try:
+        asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, "audio", config))
+    except Exception as e:
+        await context.application.bot.send_message(
+            chat_id,
+            f"❌ Error: {str(e)[:100]}",
+            parse_mode="Markdown",
+        )
+
+
+async def on_regen_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Regenerar video."""
+    query = update.callback_query
+    await query.answer()
+
+    project_id = query.data.split("_")[-1]
+    chat_id = query.message.chat_id
+
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado.")
+        return
+
+    config = ProjectConfig(**meta.get("config", {}))
+    await query.edit_message_text("🎬 Regenerando video...")
+
+    try:
+        asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, "video", config))
+    except Exception as e:
+        await context.application.bot.send_message(
+            chat_id,
+            f"❌ Error: {str(e)[:100]}",
+            parse_mode="Markdown",
+        )
+
+
+async def on_regen_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Regenerar subtítulos."""
+    query = update.callback_query
+    await query.answer()
+
+    project_id = query.data.split("_")[-1]
+    chat_id = query.message.chat_id
+
+    await query.edit_message_text("📝 Regenerando subtítulos...")
+
+    try:
+        asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, "subtitles", None))
+    except Exception as e:
+        await context.application.bot.send_message(
+            chat_id,
+            f"❌ Error: {str(e)[:100]}",
+            parse_mode="Markdown",
+        )
+
+
+async def on_setvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cambiar voz de audio y regenerar."""
+    query = update.callback_query
+    await query.answer()
+
+    data_parts = query.data.split("_")
+    voice_id = data_parts[1]
+    project_id = "_".join(data_parts[2:])
+    chat_id = query.message.chat_id
+
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado.")
+        return
+
+    # Actualizar config con nueva voz
+    import json
+    config_dict = json.loads(meta.get("config_json", "{}")) if isinstance(meta.get("config_json"), str) else meta.get("config", {})
+    if "audio" in config_dict:
+        from app.models.project import VoiceModel
+        config_dict["audio"]["voice"] = voice_id
+
+    config = ProjectConfig(**config_dict)
+
+    await query.edit_message_text(f"🎙️ Cambiando voz a `{voice_id}`...", parse_mode="Markdown")
+    asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, "audio", config))
+
+
+async def _regen_layer(bot, chat_id: int, project_id: str, layer: str, config):
+    """Regenerar una capa y notificar."""
+    try:
+        if layer == "audio":
+            await layer_service.generate_audio(project_id, config)
+            await bot.send_message(chat_id, f"✅ Audio regenerado", parse_mode="Markdown")
+        elif layer == "video":
+            await layer_service.assemble_video_layer(project_id, config)
+            await bot.send_message(chat_id, f"✅ Video regenerado", parse_mode="Markdown")
+        elif layer == "subtitles":
+            await layer_service.generate_subtitles(project_id)
+            await bot.send_message(chat_id, f"✅ Subtítulos regenerados", parse_mode="Markdown")
+    except Exception as e:
+        await bot.send_message(
+            chat_id,
+            f"❌ Error regenerando {layer}: {str(e)[:200]}",
+            parse_mode="Markdown",
+        )
+
+
+async def on_back_capas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Volver al menú de capas."""
+    query = update.callback_query
+    await query.answer()
+
+    project_id = query.data.split("_")[-1]
+    meta = project_service.get_project(project_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado.")
+        return
+
+    layers = meta.get("layers", {})
+    icons = {"ready": "✅", "pending": "⏳", "error": "❌", "empty": "⬜"}
+
+    keyboard = []
+    for layer in ("video", "audio", "subtitles", "music", "overlay"):
+        st = layers.get(layer, "empty")
+        icon = icons.get(st, "?")
+        keyboard.append([InlineKeyboardButton(f"{icon} {layer.capitalize()}", callback_data=f"layer_{layer}_{project_id}")])
+
+    await query.edit_message_text(
+        f"🎬 *Capas de {meta['title']}*\n`{project_id}`\n\nSelecciona una capa:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
 # ── App setup ─────────────────────────────────────────────────────────────────
 
 def build_app(token: str) -> Application:
@@ -338,6 +663,19 @@ def build_app(token: str) -> Application:
     application.add_handler(CommandHandler("listar", cmd_listar))
     application.add_handler(CommandHandler("estado", cmd_estado))
     application.add_handler(CommandHandler("descargar", cmd_descargar))
+    application.add_handler(CommandHandler("capas", cmd_capas))
+
+    # Capas management
+    application.add_handler(CallbackQueryHandler(on_layer_selected, pattern="^layer_"))
+    application.add_handler(CallbackQueryHandler(on_layer_download, pattern="^dl_"))
+    application.add_handler(CallbackQueryHandler(on_edit_audio, pattern="^edit_audio_"))
+    application.add_handler(CallbackQueryHandler(on_voice_menu, pattern="^voice_menu_"))
+    application.add_handler(CallbackQueryHandler(on_regen_audio, pattern="^regen_audio_"))
+    application.add_handler(CallbackQueryHandler(on_regen_video, pattern="^regen_video_"))
+    application.add_handler(CallbackQueryHandler(on_regen_subs, pattern="^regen_subs_"))
+    application.add_handler(CallbackQueryHandler(on_setvoice, pattern="^setvoice_"))
+    application.add_handler(CallbackQueryHandler(on_back_capas, pattern="^back_capas_"))
+
     application.add_handler(conv)
 
     return application
