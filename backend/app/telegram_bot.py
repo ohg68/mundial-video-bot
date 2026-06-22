@@ -823,11 +823,7 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_setvoice, pattern="^setvoice_"))
     application.add_handler(CallbackQueryHandler(on_back_capas, pattern="^back_capas_"))
 
-    # Script management
-    application.add_handler(CallbackQueryHandler(on_edit_script, pattern="^edit_script_"))
-    application.add_handler(CallbackQueryHandler(on_regen_script, pattern="^regen_script_"))
-
-    # Script editing conversation
+    # Script editing conversation (debe ir ANTES de los handlers individuales)
     script_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(on_edit_script, pattern="^edit_script_")],
         states={
@@ -839,6 +835,9 @@ def build_app(token: str) -> Application:
         fallbacks=[CommandHandler("cancelar", cmd_cancelar)],
     )
     application.add_handler(script_conv)
+
+    # Script regeneration (callback separado)
+    application.add_handler(CallbackQueryHandler(on_regen_script, pattern="^regen_script_"))
 
     application.add_handler(conv)
 
