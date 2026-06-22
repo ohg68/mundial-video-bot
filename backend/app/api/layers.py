@@ -22,11 +22,8 @@ async def generate_layer(project_id: str, layer: str, background_tasks: Backgrou
             config.topic, provider, template, config.language,
             config.match, config.match_date,
         )
-        project["config"]["script"] = script
-        project_dir = Path("projects") / project_id
-        (project_dir / "project.json").write_text(
-            json.dumps(project, indent=2, ensure_ascii=False)
-        )
+        # Persistir en SQLite (project.json es efímero en Railway)
+        project_service.update_project_config(project_id, {"script": script})
         timestamps = llm_service.estimate_timestamps(script)
         return {"script": script, "timestamps": timestamps, "provider": provider}
 
@@ -103,10 +100,10 @@ async def update_layer_config(project_id: str, layer: str, update: dict):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    project["config"][layer] = {**project["config"].get(layer, {}), **update}
-    project_dir = Path("projects") / project_id
-    (project_dir / "project.json").write_text(json.dumps(project, indent=2, ensure_ascii=False))
-    return {"updated": layer, "config": project["config"][layer]}
+    merged = {**project["config"].get(layer, {}), **update}
+    # Persistir en SQLite (project.json es efímero en Railway)
+    project_service.update_project_config(project_id, {layer: merged})
+    return {"updated": layer, "config": merged}
 
 @router.get("/{project_id}/download/{layer}")
 async def download_layer(project_id: str, layer: str):
@@ -120,8 +117,6 @@ async def update_script(project_id: str, body: dict):
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    project["config"]["script"] = body.get("script", "")
-    (Path("projects") / project_id / "project.json").write_text(
-        json.dumps(project, indent=2, ensure_ascii=False)
-    )
+    # Persistir en SQLite (no en project.json, que es efímero en Railway)
+    project_service.update_project_config(project_id, {"script": body.get("script", "")})
     return {"updated": "script"}

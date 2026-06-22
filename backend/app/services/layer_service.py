@@ -48,12 +48,8 @@ Responde SOLO con el guion, sin introduccion ni explicacion."""
         raise RuntimeError(f"DeepSeek error (status {resp.status_code}): {data}")
     script = data["choices"][0]["message"]["content"]
 
-    meta = project_service.get_project(project_id)
-    meta["config"]["script"] = script
-    project_dir = Path("projects") / project_id
-    (project_dir / "project.json").write_text(
-        __import__("json").dumps(meta, indent=2, ensure_ascii=False)
-    )
+    # Persistir en SQLite (project.json es efímero en Railway y nadie lo lee)
+    project_service.update_project_config(project_id, {"script": script})
     return script
 
 

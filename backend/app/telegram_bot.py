@@ -28,7 +28,6 @@ from app.models.project import (
     VideoSource,
 )
 from app.services import layer_service, project_service, render_service
-from app.database import SessionLocal, Project
 
 log = logging.getLogger(__name__)
 
@@ -452,25 +451,13 @@ async def on_script_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ El guión es muy largo (máx 2000 caracteres).")
         return WAITING_SCRIPT_EDIT
 
-    # Guardar nuevo guión
+    # Guardar nuevo guión en SQLite
     meta = project_service.get_project(project_id)
     if not meta:
         await update.message.reply_text("❌ Proyecto no encontrado.")
         return ConversationHandler.END
 
-    config_dict = meta.get("config", {})
-    config_dict["script"] = script
-
-    # Actualizar en DB
-    import json
-    db = SessionLocal()
-    try:
-        project = db.query(Project).filter(Project.id == project_id).first()
-        if project:
-            project.config = json.dumps(config_dict, ensure_ascii=False)
-            db.commit()
-    finally:
-        db.close()
+    project_service.update_project_config(project_id, {"script": script})
 
     await update.message.reply_text(
         f"✅ Guión guardado ({len(script)} caracteres)\n\n"
