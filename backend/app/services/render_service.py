@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import subprocess
 from pathlib import Path
 from app.services import project_service
@@ -8,6 +9,10 @@ from app.models.project import LayerStatus
 log = logging.getLogger(__name__)
 
 _has_subtitles_filter = None
+
+# Limita renders FFmpeg simultáneos para evitar OOM en Railway.
+# Configurable con MAX_CONCURRENT_RENDERS (default 2).
+_render_semaphore = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_RENDERS", "2")))
 
 
 def _check_subtitles_filter() -> bool:
@@ -147,12 +152,14 @@ async def render_final(project_id: str, quality: str = "full") -> Path:
         str(output_path),
     ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
+    # Semáforo: evita que varios renders saturen CPU/RAM en Railway
+    async with _render_semaphore:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
 
     if proc.returncode != 0:
         raise RuntimeError(f"FFmpeg error: {stderr.decode()}")

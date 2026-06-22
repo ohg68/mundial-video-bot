@@ -109,11 +109,22 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
         await layer_service.generate_audio(project_id, config)
         await bot.send_message(
             chat_id,
-            "✅ Audio generado\n\n🎬 *Descargando y ensamblando video...*",
+            "✅ Audio generado\n\n📝 *Generando subtítulos...*",
             parse_mode="Markdown",
         )
 
-        # 4. Capa de video
+        # 4. Subtítulos (sincronizados con el guión real)
+        try:
+            await layer_service.generate_subtitles(project_id, config)
+        except Exception as sub_err:
+            log.warning(f"Subtítulos fallaron, continuando sin ellos: {sub_err}")
+        await bot.send_message(
+            chat_id,
+            "✅ Subtítulos listos\n\n🎬 *Descargando y ensamblando video...*",
+            parse_mode="Markdown",
+        )
+
+        # 5. Capa de video
         await layer_service.assemble_video_layer(project_id, config)
         await bot.send_message(
             chat_id,
@@ -121,7 +132,7 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
             parse_mode="Markdown",
         )
 
-        # 5. Render final
+        # 6. Render final
         output = await render_service.render_final(project_id, quality="full")
         size_mb = output.stat().st_size / 1024 / 1024
 
@@ -131,11 +142,11 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
             parse_mode="Markdown",
         )
 
-        # 6. Entregar
+        # 7. Entregar
         caption = f"🎬 *{title}*\n_{topic}_\n\n`ID: {project_id}`"
         await _send_video(bot, chat_id, output, caption=caption)
 
-        # 7. Instrucciones post-entrega
+        # 8. Instrucciones post-entrega
         await bot.send_message(
             chat_id,
             f"✅ ¡Video listo!\n\n"

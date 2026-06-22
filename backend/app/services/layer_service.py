@@ -99,20 +99,50 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
     return output_path
 
 
-async def generate_subtitles(project_id: str) -> Path:
+async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> Path:
     project_service.update_layer_status(project_id, "subtitles", LayerStatus.pending)
     output_path = project_service.get_layer_path(project_id, "subtitles")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Obtener guión y voz reales (de config si viene, si no del proyecto guardado)
+    if config is not None:
+        script = config.script
+        voice = config.audio.voice.value
+        speed = config.audio.speed
+    else:
+        meta = project_service.get_project(project_id)
+        cfg = meta.get("config", {}) if meta else {}
+        script = cfg.get("script")
+        audio_cfg = cfg.get("audio", {})
+        voice = audio_cfg.get("voice") or "es-ES-AlvaroNeural"
+        speed = audio_cfg.get("speed", 1.0)
+
+    if not script:
+        project_service.update_layer_status(project_id, "subtitles", LayerStatus.error, {
+            "error": "No hay guión — genera el guión antes que los subtítulos.",
+        })
+        raise RuntimeError("No hay guión para generar subtítulos")
+
+    # edge-tts genera subtítulos SRT sincronizados; requiere --write-media (descartable)
+    tmp_media = output_path.with_suffix(".sub.mp3")
     proc = await asyncio.create_subprocess_exec(
         "edge-tts",
-        "--voice", "es-ES-AlvaroNeural",
-        "--text", "placeholder",
+        "--voice", voice,
+        "--rate", f"+{int((speed - 1) * 100)}%",
+        "--text", script,
+        "--write-media", str(tmp_media),
         "--write-subtitles", str(output_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    _, stderr = await proc.communicate()
+    tmp_media.unlink(missing_ok=True)
+
+    if proc.returncode != 0 or not output_path.exists():
+        project_service.update_layer_status(project_id, "subtitles", LayerStatus.error, {
+            "error": f"edge-tts falló: {stderr.decode()[-200:]}",
+        })
+        raise RuntimeError(f"Error generando subtítulos: {stderr.decode()[-200:]}")
 
     project_service.update_layer_status(project_id, "subtitles", LayerStatus.ready, {
         "file": str(output_path),
@@ -151,6 +181,33 @@ async def fetch_pexels_clips(query: str, count: int = 8) -> list:
     except Exception as e:
         log.warning(f"Pexels clips error: {e}")
         return []
+
+
+async def _download_clips(urls: list, dest_dir: Path, prefix: str) -> list:
+    """Descarga clips en paralelo, validando status_code. Devuelve paths válidos."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _one(i: int, url: str):
+        dest = dest_dir / f"{prefix}_{i}.mp4"
+        if dest.exists() and dest.stat().st_size > 10000:
+            return dest
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+                r = await client.get(url)
+            if r.status_code != 200:
+                log.warning(f"Clip {prefix}_{i} HTTP {r.status_code}: {url[:80]}")
+                return None
+            if len(r.content) < 10000:
+                log.warning(f"Clip {prefix}_{i} demasiado pequeño ({len(r.content)}B) — descartado")
+                return None
+            dest.write_bytes(r.content)
+            return dest
+        except Exception as e:
+            log.warning(f"Error descargando clip {prefix}_{i}: {e}")
+            return None
+
+    results = await asyncio.gather(*[_one(i, u) for i, u in enumerate(urls)])
+    return [r for r in results if r is not None]
 
 
 async def _get_audio_duration(path: Path) -> float:
@@ -219,24 +276,11 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
                     "msg": "Sin fotos disponibles — usando clips de video de Pexels",
                 })
                 pexels_urls = await fetch_pexels_clips(pexels_query, 6)
-                async with httpx.AsyncClient() as client:
-                    for i, url in enumerate(pexels_urls):
-                        dest = dl_dir / f"pexels_fallback_{i}.mp4"
-                        if not dest.exists():
-                            r = await client.get(url, timeout=30, follow_redirects=True)
-                            dest.write_bytes(r.content)
-                        clips.append(dest)
+                clips = await _download_clips(pexels_urls, dl_dir, "pexels_fallback")
         else:
             # mixed_photos: always fetch pexels (fills in if photos also failed)
-            pexels_clips: list[Path] = []
             pexels_urls = await fetch_pexels_clips(pexels_query, 3)
-            async with httpx.AsyncClient() as client:
-                for i, url in enumerate(pexels_urls):
-                    dest = dl_dir / f"pexels_mix_{i}.mp4"
-                    if not dest.exists():
-                        r = await client.get(url, timeout=30, follow_redirects=True)
-                        dest.write_bytes(r.content)
-                    pexels_clips.append(dest)
+            pexels_clips = await _download_clips(pexels_urls, dl_dir, "pexels_mix")
             # Interleave: photo, video, photo, video, ...
             # If photo_clips is empty (no API key), result is pexels-only — still usable
             for i in range(max(len(photo_clips), len(pexels_clips))):
@@ -256,13 +300,7 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         pexels_query = " ".join(config.topic.split()[:4])
         pexels_urls = await fetch_pexels_clips(pexels_query, 8 - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
-        dl_dir.mkdir(parents=True, exist_ok=True)
-        async with httpx.AsyncClient() as client:
-            for i, url in enumerate(pexels_urls):
-                dest = dl_dir / f"pexels_{i}.mp4"
-                r = await client.get(url, timeout=30, follow_redirects=True)
-                dest.write_bytes(r.content)
-                clips.append(dest)
+        clips.extend(await _download_clips(pexels_urls, dl_dir, "pexels"))
 
     if not clips:
         project_service.update_layer_status(project_id, "video", LayerStatus.error, {
