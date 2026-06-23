@@ -50,6 +50,7 @@ class Project(Base):
             "layers": json.loads(self.layers) if self.layers else {},
             "layer_info": json.loads(self.layer_info) if self.layer_info else {},
             "output": self.output,
+            "owner_id": self.owner_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -37,6 +37,56 @@ log = logging.getLogger(__name__)
  WAITING_VIDEO_SOURCE, WAITING_FILE_UPLOAD,
  WAITING_SCRIPT_EDIT) = range(9)
 
+# ── Seguridad ─────────────────────────────────────────────────────────────────
+
+def _allowed_chats() -> set:
+    """Chat IDs autorizados desde TELEGRAM_ALLOWED_CHATS (coma-separados).
+    Si la variable está vacía, el bot es abierto (comportamiento legacy)."""
+    raw = os.getenv("TELEGRAM_ALLOWED_CHATS", "").strip()
+    if not raw:
+        return set()
+    out = set()
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            out.add(int(part))
+    return out
+
+
+async def _guard(update: Update) -> bool:
+    """Devuelve True si el chat está autorizado; si no, responde y devuelve False."""
+    allowed = _allowed_chats()
+    if not allowed:
+        return True  # bot abierto
+    chat = update.effective_chat
+    if chat and chat.id in allowed:
+        return True
+    msg = update.effective_message
+    if msg:
+        await msg.reply_text(
+            f"🔒 No estás autorizado para usar este bot.\n"
+            f"Tu chat ID es `{chat.id if chat else '?'}` — pídele al admin que lo agregue.",
+            parse_mode="Markdown",
+        )
+    return False
+
+
+def _owns(project_id: str, chat_id: int):
+    """Devuelve el proyecto si pertenece al chat_id; None si no existe o no es suyo.
+    Cuando el bot es abierto (sin whitelist), no se aplica filtro de propiedad."""
+    meta = project_service.get_project(project_id)
+    if not meta:
+        return None
+    # Bot abierto: sin aislamiento por usuario
+    if not _allowed_chats():
+        return meta
+    owner = meta.get("owner_id")
+    # Proyectos antiguos sin owner (owner_id None) quedan accesibles
+    if owner is None or owner == chat_id:
+        return meta
+    return None
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _build_config(title: str, topic: str, source: str = "pexels") -> ProjectConfig:
@@ -80,9 +130,9 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
     """Genera el video completo y lo entrega por Telegram."""
     project_id = None
     try:
-        # 1. Crear proyecto
+        # 1. Crear proyecto (owner = chat_id de Telegram para aislamiento por usuario)
         config = _build_config(title, topic, source)
-        meta = project_service.create_project(config, owner_id=None)
+        meta = project_service.create_project(config, owner_id=chat_id)
         project_id = meta["id"]
 
         await bot.send_message(
@@ -169,6 +219,9 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id if update.effective_chat else "?"
+    if not await _guard(update):
+        return
     await update.message.reply_text(
         "🎬 *LayerCut Bot — Mundial 2026*\n\n"
         "Genera videos automáticamente sobre el Mundial.\n\n"
@@ -180,12 +233,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Edición:*\n"
         "• /capas `ID` — Editar capas (video/audio/subs)\n"
         "• /guion `ID` — Editar guión\n\n"
-        "Tip: Copia el ID que aparece al crear un video",
+        f"Tu chat ID: `{chat_id}`",
         parse_mode="Markdown",
     )
 
 
 async def cmd_nuevo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _guard(update):
+        return ConversationHandler.END
     await update.message.reply_text(
         "🎬 *Nuevo video*\n\n¿Cuál es el *título* del video?",
         parse_mode="Markdown",
@@ -254,8 +309,15 @@ async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_ultimos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostrar últimos 10 proyectos con IDs copiables."""
-    projects = project_service.list_projects()
+    """Mostrar últimos 10 proyectos del usuario con IDs copiables."""
+    if not await _guard(update):
+        return
+
+    chat_id = update.effective_chat.id
+    # Con whitelist activa, solo los proyectos del usuario; si es abierto, todos.
+    owner_filter = chat_id if _allowed_chats() else None
+    projects = project_service.list_projects(owner_id=owner_filter)
+
     if not projects:
         await update.message.reply_text(
             "No hay proyectos aún. Usa /nuevo para crear uno."
@@ -268,8 +330,6 @@ async def cmd_ultimos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         video = layers.get("video", "empty")
         audio = layers.get("audio", "empty")
         icons = ("✅" if video == "ready" else "⏳") + ("🔊" if audio == "ready" else "")
-
-        # Formato: ID copiable + título
         lines.append(f"{icons} `{p['id']}`\n   _{p['title']}_")
 
     lines.append("\n*Usa:*\n")
@@ -280,27 +340,13 @@ async def cmd_ultimos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-async def cmd_listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    projects = project_service.list_projects()
-    if not projects:
-        await update.message.reply_text(
-            "No hay proyectos aún. Usa /nuevo para crear uno."
-        )
-        return
-
-    lines = ["*Proyectos recientes:*\n"]
-    for p in projects[:10]:
-        layers = p.get("layers", {})
-        video = layers.get("video", "empty")
-        audio = layers.get("audio", "empty")
-        icons = ("✅" if video == "ready" else "⏳") + ("🔊" if audio == "ready" else "")
-        lines.append(f"{icons} `{p['id']}` — _{p['title']}_")
-
-    lines.append("\n_Usa /descargar ID para recibir el render_")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+# /listar es alias de /ultimos (mismo comportamiento)
+cmd_listar = cmd_ultimos
 
 
 async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _guard(update):
+        return
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -309,9 +355,9 @@ async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     project_id = args[0]
-    meta = project_service.get_project(project_id)
+    meta = _owns(project_id, update.effective_chat.id)
     if not meta:
-        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
         return
 
     layers = meta.get("layers", {})
@@ -346,6 +392,8 @@ async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _guard(update):
+        return
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -354,6 +402,11 @@ async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     project_id = args[0]
+    meta = _owns(project_id, update.effective_chat.id)
+    if not meta:
+        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
+        return
+
     output = Path("projects") / project_id / "output" / "final.mp4"
     if not output.exists():
         output = Path("projects") / project_id / "output" / "preview.mp4"
@@ -366,9 +419,8 @@ async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    meta = project_service.get_project(project_id)
-    title = meta.get("title", project_id) if meta else project_id
-    topic = meta.get("topic", "") if meta else ""
+    title = meta.get("title", project_id)
+    topic = meta.get("topic", "")
 
     msg = await update.message.reply_text("📤 Enviando video, espera...")
     caption = f"🎬 *{title}*\n_{topic}_\n\n`ID: {project_id}`"
@@ -378,6 +430,8 @@ async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_guion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ver y editar el guión de un proyecto."""
+    if not await _guard(update):
+        return
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -386,9 +440,9 @@ async def cmd_guion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     project_id = args[0]
-    meta = project_service.get_project(project_id)
+    meta = _owns(project_id, update.effective_chat.id)
     if not meta:
-        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
         return
 
     config = meta.get("config", {})
@@ -509,6 +563,8 @@ async def _regen_script(bot, chat_id: int, project_id: str, config):
 
 async def cmd_capas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostrar y editar capas individuales de un proyecto."""
+    if not await _guard(update):
+        return
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -517,9 +573,9 @@ async def cmd_capas(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     project_id = args[0]
-    meta = project_service.get_project(project_id)
+    meta = _owns(project_id, update.effective_chat.id)
     if not meta:
-        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
         return
 
     layers = meta.get("layers", {})
