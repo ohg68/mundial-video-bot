@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from app.models.project import ProjectConfig, VideoSource, LayerStatus
 from app.services import project_service, photo_sources
+from app.services.script_utils import clean_script
 
 log = logging.getLogger(__name__)
 LOCAL_CLIPS_DIR = Path(os.getenv("LOCAL_CLIPS_DIR", "clips"))
@@ -59,6 +60,7 @@ Responde SOLO con el guion, sin introducción ni explicación."""
     if resp.status_code != 200 or "choices" not in data:
         raise RuntimeError(f"DeepSeek error (status {resp.status_code}): {data}")
     script = data["choices"][0]["message"]["content"]
+    script = clean_script(script)  # quitar encabezados/acotaciones del LLM
 
     # Persistir en SQLite (project.json es efímero en Railway y nadie lo lee)
     project_service.update_project_config(project_id, {"script": script})
@@ -68,6 +70,7 @@ Responde SOLO con el guion, sin introducción ni explicación."""
 async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
     project_service.update_layer_status(project_id, "audio", LayerStatus.pending)
     script = config.script or await generate_script(project_id, config)
+    script = clean_script(script)  # defensa: solo texto narrable al TTS
     output_path = project_service.get_layer_path(project_id, "audio")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -130,6 +133,8 @@ async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> P
             "error": "No hay guión — genera el guión antes que los subtítulos.",
         })
         raise RuntimeError("No hay guión para generar subtítulos")
+
+    script = clean_script(script)  # defensa: solo texto narrable a los subtítulos
 
     # edge-tts genera subtítulos SRT sincronizados; requiere --write-media (descartable)
     tmp_media = output_path.with_suffix(".sub.mp3")

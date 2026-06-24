@@ -4,6 +4,8 @@ from typing import Optional
 
 import httpx
 
+from app.services.script_utils import clean_script
+
 log = logging.getLogger(__name__)
 
 TEMPLATES = {
@@ -159,13 +161,15 @@ async def generate_script(
     prompt = _build_prompt(topic, template, language, match, match_date)
 
     if provider == "deepseek":
-        return await generate_deepseek(prompt)
+        raw = await generate_deepseek(prompt)
     elif provider == "claude":
-        return await generate_claude(prompt)
+        raw = await generate_claude(prompt)
     elif provider == "openai":
-        return await generate_openai(prompt)
+        raw = await generate_openai(prompt)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
+
+    return clean_script(raw)  # quitar encabezados/acotaciones del LLM
 
 
 def estimate_timestamps(script: str, wpm: float = 150) -> list:
