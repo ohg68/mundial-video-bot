@@ -195,15 +195,11 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
         caption = f"🎬 *{title}*\n_{topic}_\n\n`ID: {project_id}`"
         await _send_video(bot, chat_id, output, caption=caption)
 
-        # 8. Instrucciones post-entrega
+        # 8. Botones de acción (sin escribir el ID a mano)
         await bot.send_message(
             chat_id,
-            f"✅ ¡Video listo!\n\n"
-            f"*Próximos pasos:*\n"
-            f"• `/capas {project_id}` — editar capas\n"
-            f"• `/guion {project_id}` — editar guión\n"
-            f"• `/ultimos` — ver últimos 10 proyectos",
-            parse_mode="Markdown",
+            "✅ ¡Video listo! ¿Qué quieres hacer ahora?",
+            reply_markup=_actions_kb(project_id),
         )
 
     except Exception as e:
@@ -432,20 +428,20 @@ async def cmd_ultimos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    lines = ["*Últimos proyectos (copia el ID):*\n"]
+    # Cada proyecto como botón → abre su menú de acciones (sin escribir IDs)
+    rows = []
     for p in projects[:10]:
         layers = p.get("layers", {})
         video = layers.get("video", "empty")
-        audio = layers.get("audio", "empty")
-        icons = ("✅" if video == "ready" else "⏳") + ("🔊" if audio == "ready" else "")
-        lines.append(f"{icons} `{p['id']}`\n   _{p['title']}_")
+        ready = "✅" if video == "ready" else "⏳"
+        label = f"{ready} {p['title'][:38]}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"pmenu_{p['id']}")])
 
-    lines.append("\n*Usa:*\n")
-    lines.append("• `/capas ID` — editar capas\n")
-    lines.append("• `/guion ID` — editar guión\n")
-    lines.append("• `/estado ID` — ver estado")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text(
+        "*Tus proyectos* — toca uno para gestionarlo:",
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode="Markdown",
+    )
 
 
 # /listar es alias de /ultimos (mismo comportamiento)
@@ -536,51 +532,121 @@ async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.delete()
 
 
+# ── Vistas reutilizables (comando o botón) ─────────────────────────────────────
+
+async def _send_project_picker(update: Update, prompt: str, action_prefix: str):
+    """Muestra los proyectos del usuario como botones para elegir sin escribir ID.
+    action_prefix: 'pg' (guión) o 'pc' (capas)."""
+    chat_id = update.effective_chat.id
+    owner_filter = chat_id if _allowed_chats() else None
+    projects = project_service.list_projects(owner_id=owner_filter)
+    if not projects:
+        await update.message.reply_text("No tienes proyectos aún. Usa /nuevo para crear uno.")
+        return
+    rows = []
+    for p in projects[:10]:
+        label = p["title"][:35] or p["id"]
+        rows.append([InlineKeyboardButton(f"🎬 {label}", callback_data=f"{action_prefix}_{p['id']}")])
+    await update.message.reply_text(prompt, reply_markup=InlineKeyboardMarkup(rows))
+
+
+def _actions_kb(project_id: str) -> InlineKeyboardMarkup:
+    """Botones de acción principal de un proyecto (sin escribir el ID a mano)."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📝 Guión", callback_data=f"pg_{project_id}"),
+            InlineKeyboardButton("🎬 Capas", callback_data=f"pc_{project_id}"),
+        ],
+        [InlineKeyboardButton("📥 Descargar video", callback_data=f"pd_{project_id}")],
+    ])
+
+
+def _guion_view(meta: dict):
+    """Construye (texto, keyboard) para mostrar el guión de un proyecto."""
+    project_id = meta["id"]
+    config = meta.get("config", {})
+    script = config.get("script") if isinstance(config, dict) else None
+    if not script:
+        script = "(sin guión aún — genera uno con 🤖)"
+    preview = script[:800]
+    truncated = "..." if len(script) > 800 else ""
+    text = f"📝 *Guión: {meta['title']}*\n\n```\n{preview}{truncated}\n```"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Editar guión", callback_data=f"edit_script_{project_id}")],
+        [InlineKeyboardButton("🤖 Regenerar con IA", callback_data=f"regen_script_{project_id}")],
+        [InlineKeyboardButton("🎬 Capas", callback_data=f"pc_{project_id}")],
+    ])
+    return text, kb
+
+
+def _capas_view(meta: dict):
+    """Construye (texto, keyboard) para el menú de capas de un proyecto."""
+    project_id = meta["id"]
+    layers = meta.get("layers", {})
+    icons = {"ready": "✅", "pending": "⏳", "error": "❌", "empty": "⬜"}
+    rows = []
+    for layer in ("video", "audio", "subtitles", "music", "overlay"):
+        st = layers.get(layer, "empty")
+        icon = icons.get(st, "?")
+        rows.append([InlineKeyboardButton(f"{icon} {layer.capitalize()}", callback_data=f"layer_{layer}_{project_id}")])
+    rows.append([InlineKeyboardButton("📝 Guión", callback_data=f"pg_{project_id}")])
+    text = f"🎬 *Capas de {meta['title']}*\n\nSelecciona una capa para ver opciones:"
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def on_proj_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja los botones de acción de proyecto: pg_ (guión), pc_ (capas), pd_ (descargar)."""
+    query = update.callback_query
+    await query.answer()
+
+    kind, project_id = query.data.split("_", 1)
+    chat_id = query.message.chat_id
+    meta = _owns(project_id, chat_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado o no es tuyo.")
+        return
+
+    if kind == "pmenu":
+        await query.edit_message_text(
+            f"🎬 *{meta['title']}*\n\n¿Qué quieres hacer?",
+            reply_markup=_actions_kb(project_id),
+            parse_mode="Markdown",
+        )
+    elif kind == "pg":
+        text, kb = _guion_view(meta)
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+    elif kind == "pc":
+        text, kb = _capas_view(meta)
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+    elif kind == "pd":
+        output = Path("projects") / project_id / "output" / "final.mp4"
+        if not output.exists():
+            output = Path("projects") / project_id / "output" / "preview.mp4"
+        if not output.exists():
+            await query.answer("Aún no hay render para este proyecto", show_alert=True)
+            return
+        await context.application.bot.send_message(chat_id, "📤 Enviando video...")
+        caption = f"🎬 *{meta.get('title', project_id)}*\n_{meta.get('topic','')}_"
+        await _send_video(context.application.bot, chat_id, output, caption)
+
+
 async def cmd_guion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ver y editar el guión de un proyecto."""
     if not await _guard(update):
         return
     args = context.args
     if not args:
-        await update.message.reply_text(
-            "Uso: `/guion ID_proyecto`", parse_mode="Markdown"
-        )
+        # Sin ID: ofrecer la lista de proyectos como botones
+        await _send_project_picker(update, "📝 Elige un proyecto para ver/editar su guión:", "pg")
         return
 
-    project_id = args[0]
-    meta = _owns(project_id, update.effective_chat.id)
+    meta = _owns(args[0], update.effective_chat.id)
     if not meta:
-        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Proyecto `{args[0]}` no encontrado o no es tuyo.", parse_mode="Markdown")
         return
 
-    config = meta.get("config", {})
-    # Script puede ser None o una cadena vacía
-    script = config.get("script") if isinstance(config, dict) else None
-
-    if not script:
-        script = "(sin guión aún — genera uno con 🤖)"
-
-    # Mostrar guión con opción de editar
-    preview = script[:800] if len(script) > 800 else script
-    truncated = "..." if len(script) > 800 else ""
-
-    keyboard = [
-        [InlineKeyboardButton("✏️ Editar guión", callback_data=f"edit_script_{project_id}")],
-        [InlineKeyboardButton("🤖 Regenerar con IA", callback_data=f"regen_script_{project_id}")],
-    ]
-
-    try:
-        await update.message.reply_text(
-            f"📝 *Guión: {meta['title']}*\n\n```\n{preview}{truncated}\n```",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        log.error(f"Error en cmd_guion: {e}", exc_info=True)
-        await update.message.reply_text(
-            f"❌ Error: {str(e)[:100]}",
-            parse_mode="Markdown",
-        )
+    text, kb = _guion_view(meta)
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
 
 
 async def on_edit_script(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -675,31 +741,17 @@ async def cmd_capas(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = context.args
     if not args:
-        await update.message.reply_text(
-            "Uso: `/capas ID_proyecto`", parse_mode="Markdown"
-        )
+        # Sin ID: ofrecer la lista de proyectos como botones
+        await _send_project_picker(update, "🎬 Elige un proyecto para editar sus capas:", "pc")
         return
 
-    project_id = args[0]
-    meta = _owns(project_id, update.effective_chat.id)
+    meta = _owns(args[0], update.effective_chat.id)
     if not meta:
-        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Proyecto `{args[0]}` no encontrado o no es tuyo.", parse_mode="Markdown")
         return
 
-    layers = meta.get("layers", {})
-    icons = {"ready": "✅", "pending": "⏳", "error": "❌", "empty": "⬜"}
-
-    keyboard = []
-    for layer in ("video", "audio", "subtitles", "music", "overlay"):
-        st = layers.get(layer, "empty")
-        icon = icons.get(st, "?")
-        keyboard.append([InlineKeyboardButton(f"{icon} {layer.capitalize()}", callback_data=f"layer_{layer}_{project_id}")])
-
-    await update.message.reply_text(
-        f"🎬 *Capas de {meta['title']}*\n`{project_id}`\n\nSelecciona una capa para ver opciones:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown",
-    )
+    text, kb = _capas_view(meta)
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
 
 
 async def on_layer_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1014,6 +1066,9 @@ def build_app(token: str) -> Application:
     application.add_handler(CommandHandler("descargar", cmd_descargar))
     application.add_handler(CommandHandler("capas", cmd_capas))
     application.add_handler(CommandHandler("guion", cmd_guion))
+
+    # Acciones de proyecto por botón (menú, guión, capas, descargar)
+    application.add_handler(CallbackQueryHandler(on_proj_action, pattern="^(pmenu|pg|pc|pd)_"))
 
     # Capas management
     application.add_handler(CallbackQueryHandler(on_layer_selected, pattern="^layer_"))
