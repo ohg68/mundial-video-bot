@@ -27,7 +27,7 @@ from app.models.project import (
     VideoLayerConfig,
     VideoSource,
 )
-from app.services import layer_service, project_service, render_service
+from app.services import layer_service, project_service, render_service, voice_service
 
 log = logging.getLogger(__name__)
 
@@ -216,6 +216,89 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
         )
 
 
+# ── Voz ───────────────────────────────────────────────────────────────────────
+
+async def _download_voice(bot, voice) -> Path:
+    """Descarga una nota de voz de Telegram a un archivo temporal .ogg."""
+    tmp_dir = Path("projects") / "_voice"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    dest = tmp_dir / f"{voice.file_id}.ogg"
+    tg_file = await bot.get_file(voice.file_id)
+    await tg_file.download_to_drive(str(dest))
+    return dest
+
+
+async def _transcribe_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Transcribe la nota de voz del update. Devuelve texto o '' si falla."""
+    voice = update.message.voice
+    audio_path = await _download_voice(context.application.bot, voice)
+    try:
+        return await voice_service.transcribe(audio_path)
+    finally:
+        audio_path.unlink(missing_ok=True)
+
+
+async def on_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja notas de voz sueltas (fuera de conversación):
+    transcribe → interpreta intención → actúa."""
+    if not await _guard(update):
+        return
+
+    chat_id = update.effective_chat.id
+    status = await update.message.reply_text("🎤 Transcribiendo tu mensaje...")
+
+    try:
+        text = await _transcribe_update(update, context)
+    except Exception as e:
+        await status.edit_text(
+            f"❌ No pude transcribir el audio:\n`{str(e)[:150]}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    if not text:
+        await status.edit_text("🤔 No entendí nada en el audio. Intenta de nuevo.")
+        return
+
+    await status.edit_text(
+        f"📝 Entendí:\n_{text}_\n\n🧠 Procesando...",
+        parse_mode="Markdown",
+    )
+
+    intent = await voice_service.extract_intent(text)
+    action = intent.get("action", "unknown")
+
+    if action == "create":
+        title = intent.get("title") or text[:60]
+        topic = intent.get("topic") or text
+        source = intent.get("source", "pexels")
+        if source not in ("photos", "pexels", "mixed_photos"):
+            source = "pexels"
+
+        src_label = {"photos": "📷 Fotos", "pexels": "🎬 Video", "mixed_photos": "🔀 Mix"}[source]
+        await status.edit_text(
+            f"🚀 *Creando video por voz:*\n"
+            f"Título: _{title}_\n"
+            f"Tema: _{topic}_\n"
+            f"Fuente: {src_label}\n\n"
+            f"Iniciando pipeline...",
+            parse_mode="Markdown",
+        )
+        asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source))
+
+    elif action == "list":
+        await status.delete()
+        await cmd_ultimos(update, context)
+
+    else:
+        await status.edit_text(
+            "🤔 No entendí qué querías hacer.\n\n"
+            "Prueba diciendo algo como:\n"
+            "_\"Crea un video sobre la final del Mundial con fotos\"_",
+            parse_mode="Markdown",
+        )
+
+
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -233,6 +316,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Edición:*\n"
         "• /capas `ID` — Editar capas (video/audio/subs)\n"
         "• /guion `ID` — Editar guión\n\n"
+        "🎤 *Comando por voz:* envía una nota de voz como\n"
+        "_\"Crea un video sobre la final del Mundial con fotos\"_\n"
+        "y el bot lo genera automáticamente.\n\n"
         f"Tu chat ID: `{chat_id}`",
         parse_mode="Markdown",
     )
@@ -242,25 +328,47 @@ async def cmd_nuevo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return ConversationHandler.END
     await update.message.reply_text(
-        "🎬 *Nuevo video*\n\n¿Cuál es el *título* del video?",
+        "🎬 *Nuevo video*\n\n¿Cuál es el *título* del video?\n"
+        "_Puedes escribirlo o enviarlo por nota de voz 🎤_",
         parse_mode="Markdown",
     )
     return WAITING_TITLE
 
 
+async def _input_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Obtiene el texto del mensaje: si es voz, lo transcribe; si es texto, lo devuelve."""
+    if update.message.voice:
+        thinking = await update.message.reply_text("🎤 Transcribiendo...")
+        try:
+            text = await _transcribe_update(update, context)
+        finally:
+            await thinking.delete()
+        return (text or "").strip()
+    return (update.message.text or "").strip()
+
+
 async def on_titulo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["title"] = update.message.text.strip()
+    title = await _input_text(update, context)
+    if not title:
+        await update.message.reply_text("🤔 No entendí el título. Inténtalo de nuevo.")
+        return WAITING_TITLE
+    context.user_data["title"] = title
     await update.message.reply_text(
         f"✅ Título: *{context.user_data['title']}*\n\n"
         "¿Cuál es el *tema o descripción* del video?\n"
-        "_Ejemplo: Resumen del partido Argentina vs Francia, final del Mundial 2026_",
+        "_Ejemplo: Resumen del partido Argentina vs Francia, final del Mundial 2026_\n"
+        "_También por voz 🎤_",
         parse_mode="Markdown",
     )
     return WAITING_TOPIC
 
 
 async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["topic"] = update.message.text.strip()
+    topic = await _input_text(update, context)
+    if not topic:
+        await update.message.reply_text("🤔 No entendí el tema. Inténtalo de nuevo.")
+        return WAITING_TOPIC
+    context.user_data["topic"] = topic
 
     keyboard = [
         [InlineKeyboardButton("📷 Fotos de Internet (Ken Burns)", callback_data="src_photos")],
@@ -892,8 +1000,8 @@ def build_app(token: str) -> Application:
     conv = ConversationHandler(
         entry_points=[CommandHandler("nuevo", cmd_nuevo)],
         states={
-            WAITING_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_titulo)],
-            WAITING_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_tema)],
+            WAITING_TITLE: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_titulo)],
+            WAITING_TOPIC: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_tema)],
             WAITING_SOURCE: [CallbackQueryHandler(on_fuente, pattern="^src_")],
         },
         fallbacks=[CommandHandler("cancelar", cmd_cancelar)],
@@ -935,6 +1043,10 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_regen_script, pattern="^regen_script_"))
 
     application.add_handler(conv)
+
+    # Notas de voz sueltas (fuera de conversación): comando por voz.
+    # Va al final para que la conversación /nuevo capture la voz primero.
+    application.add_handler(MessageHandler(filters.VOICE, on_voice_message))
 
     return application
 
