@@ -13,20 +13,32 @@ LOCAL_CLIPS_DIR = Path(os.getenv("LOCAL_CLIPS_DIR", "clips"))
 
 async def generate_script(project_id: str, config: ProjectConfig) -> str:
     project_service.update_layer_status(project_id, "audio", LayerStatus.pending)
-    prompt = f"""Eres un locutor deportivo para un canal de YouTube del Mundial 2026.
-Genera un guion en espanol para un video corto (90 segundos) sobre:
-Tema: {config.topic}
-Partido: {config.match or "Mundial 2026"}
-Fecha: {config.match_date or ""}
+
+    # Contexto extra (partido/fecha) solo si el proyecto lo trae; no forzar deporte.
+    extra = ""
+    if config.match:
+        extra += f"\nPartido/evento: {config.match}"
+    if config.match_date:
+        extra += f"\nFecha: {config.match_date}"
+
+    prompt = f"""Eres un guionista de videos cortos para redes sociales (YouTube Shorts, TikTok, Reels).
+Genera un guion en español para un video corto de ~90 segundos sobre el siguiente tema.
+
+Título: {config.title}
+Tema: {config.topic}{extra}
+
+Importante:
+- Adáptate EXACTAMENTE al tema indicado. No inventes ni mezcles otros temas.
+- No asumas que es sobre fútbol ni el Mundial salvo que el tema lo diga explícitamente.
 
 El guion debe:
-- Tener un gancho en los primeros 5 segundos
-- Ser informativo y emocionante
-- Terminar con una llamada a la accion (suscribete, comenta)
-- Durar aproximadamente 90 segundos al leerlo
-- Solo el texto que leera el locutor, sin indicaciones de escena
+- Tener un gancho potente en los primeros 5 segundos
+- Ser informativo, claro y atractivo
+- Terminar con una llamada a la acción (suscríbete, comenta)
+- Durar aproximadamente 90 segundos al leerlo en voz alta
+- Contener solo el texto que leerá el narrador, sin indicaciones de escena ni acotaciones
 
-Responde SOLO con el guion, sin introduccion ni explicacion."""
+Responde SOLO con el guion, sin introducción ni explicación."""
 
     deepseek_key = os.getenv("DEEPSEEK_API_KEY")
     async with httpx.AsyncClient() as client:
