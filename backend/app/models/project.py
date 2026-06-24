@@ -65,7 +65,7 @@ class MusicLayerConfig(BaseModel):
 
 class SubtitleLayerConfig(BaseModel):
     font: str = "Arial"
-    font_size: int = 48
+    font_size: int = 72  # píxeles reales (resolución del video)
     color: str = "white"
     outline: bool = True
     position: Literal["top", "center", "bottom"] = "bottom"

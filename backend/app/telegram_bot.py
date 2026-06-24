@@ -794,6 +794,11 @@ async def on_layer_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("🎬 Cambiar fuente", callback_data=f"edit_video_{project_id}")])
         keyboard.append([InlineKeyboardButton("🔄 Regenerar video", callback_data=f"regen_video_{project_id}")])
     elif layer == "subtitles":
+        sub_cfg = meta.get("config", {}).get("subtitles", {})
+        size = sub_cfg.get("font_size", 72)
+        pos = {"top": "arriba", "center": "centro", "bottom": "abajo"}.get(sub_cfg.get("position", "bottom"), "abajo")
+        desc += f"\nTamaño: {size}px · Posición: {pos}"
+        keyboard.append([InlineKeyboardButton("📐 Ajustar tamaño y posición", callback_data=f"substyle_{project_id}")])
         keyboard.append([InlineKeyboardButton("✏️ Regenerar subtítulos", callback_data=f"regen_subs_{project_id}")])
     else:
         keyboard.append([InlineKeyboardButton("📤 Subir archivo", callback_data=f"upload_{layer}_{project_id}")])
@@ -1017,6 +1022,99 @@ async def _regen_layer(bot, chat_id: int, project_id: str, layer: str, config):
         )
 
 
+async def on_substyle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Submenú: ajustar tamaño y posición de subtítulos."""
+    query = update.callback_query
+    await query.answer()
+    project_id = query.data.split("_")[-1]
+
+    meta = _owns(project_id, query.message.chat_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado o no es tuyo.")
+        return
+
+    sub_cfg = meta.get("config", {}).get("subtitles", {})
+    size = sub_cfg.get("font_size", 72)
+    pos = sub_cfg.get("position", "bottom")
+    pos_label = {"top": "arriba", "center": "centro", "bottom": "abajo"}.get(pos, "abajo")
+
+    kb = [
+        [
+            InlineKeyboardButton("🔡 Pequeño", callback_data=f"subsz_56_{project_id}"),
+            InlineKeyboardButton("🔠 Mediano", callback_data=f"subsz_72_{project_id}"),
+            InlineKeyboardButton("🔠 Grande", callback_data=f"subsz_96_{project_id}"),
+        ],
+        [
+            InlineKeyboardButton("⬆️ Arriba", callback_data=f"subps_top_{project_id}"),
+            InlineKeyboardButton("⏺ Centro", callback_data=f"subps_center_{project_id}"),
+            InlineKeyboardButton("⬇️ Abajo", callback_data=f"subps_bottom_{project_id}"),
+        ],
+        [InlineKeyboardButton("🔄 Aplicar y re-renderizar", callback_data=f"subrender_{project_id}")],
+        [InlineKeyboardButton("◀️ Volver", callback_data=f"pc_{project_id}")],
+    ]
+    await query.edit_message_text(
+        f"📐 *Estilo de subtítulos*\n\n"
+        f"Tamaño actual: *{size}px*\nPosición: *{pos_label}*\n\n"
+        f"Elige tamaño y posición, luego *Aplicar y re-renderizar*.",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown",
+    )
+
+
+async def on_sub_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Setear tamaño (subsz_) o posición (subps_) de subtítulos."""
+    query = update.callback_query
+    parts = query.data.split("_")
+    kind = parts[0]            # 'subsz' o 'subps'
+    value = parts[1]
+    project_id = "_".join(parts[2:])
+
+    meta = _owns(project_id, query.message.chat_id)
+    if not meta:
+        await query.answer("Proyecto no encontrado", show_alert=True)
+        return
+
+    sub_cfg = dict(meta.get("config", {}).get("subtitles", {}))
+    if kind == "subsz":
+        sub_cfg["font_size"] = int(value)
+        await query.answer(f"Tamaño: {value}px")
+    else:
+        sub_cfg["position"] = value
+        await query.answer(f"Posición: {value}")
+
+    project_service.update_project_config(project_id, {"subtitles": sub_cfg})
+
+    # Refrescar el submenú para reflejar el cambio
+    query.data = f"substyle_{project_id}"
+    await on_substyle(update, context)
+
+
+async def on_subrender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-renderizar el video con el nuevo estilo de subtítulos y entregarlo."""
+    query = update.callback_query
+    await query.answer()
+    project_id = query.data.split("_")[-1]
+    chat_id = query.message.chat_id
+
+    meta = _owns(project_id, chat_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado o no es tuyo.")
+        return
+
+    await query.edit_message_text("⚡ Re-renderizando con el nuevo estilo de subtítulos...")
+    asyncio.create_task(_rerender_and_send(context.application.bot, chat_id, project_id, meta))
+
+
+async def _rerender_and_send(bot, chat_id: int, project_id: str, meta: dict):
+    try:
+        output = await render_service.render_final(project_id, quality="full")
+        caption = f"🎬 *{meta.get('title', project_id)}* (subtítulos actualizados)"
+        await _send_video(bot, chat_id, output, caption)
+    except Exception as e:
+        log.error(f"Re-render error: {e}", exc_info=True)
+        await bot.send_message(chat_id, f"❌ Error al re-renderizar:\n`{str(e)[:200]}`", parse_mode="Markdown")
+
+
 async def on_back_capas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Volver al menú de capas."""
     query = update.callback_query
@@ -1078,6 +1176,9 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_regen_audio, pattern="^regen_audio_"))
     application.add_handler(CallbackQueryHandler(on_regen_video, pattern="^regen_video_"))
     application.add_handler(CallbackQueryHandler(on_regen_subs, pattern="^regen_subs_"))
+    application.add_handler(CallbackQueryHandler(on_substyle, pattern="^substyle_"))
+    application.add_handler(CallbackQueryHandler(on_sub_set, pattern="^(subsz|subps)_"))
+    application.add_handler(CallbackQueryHandler(on_subrender, pattern="^subrender_"))
     application.add_handler(CallbackQueryHandler(on_setvoice, pattern="^setvoice_"))
     application.add_handler(CallbackQueryHandler(on_back_capas, pattern="^back_capas_"))
 

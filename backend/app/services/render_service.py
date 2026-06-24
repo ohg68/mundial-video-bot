@@ -33,6 +33,68 @@ def _escape_srt_path(p: Path) -> str:
     return s
 
 
+def _parse_srt(srt_text: str):
+    """Parsea un SRT en bloques (start, end, text). Tiempos a 'H:MM:SS.cc' (ASS)."""
+    import re
+    blocks = []
+    pattern = re.compile(
+        r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
+    )
+    chunks = re.split(r"\n\s*\n", srt_text.strip())
+    for chunk in chunks:
+        m = pattern.search(chunk)
+        if not m:
+            continue
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = m.groups()
+        start = f"{int(h1)}:{m1}:{s1}.{ms1[:2]}"
+        end = f"{int(h2)}:{m2}:{s2}.{ms2[:2]}"
+        lines = chunk.split("\n")
+        # texto = todo lo que sigue a la línea del timestamp
+        ts_idx = next((i for i, ln in enumerate(lines) if "-->" in ln), 0)
+        text = "\\N".join(ln.strip() for ln in lines[ts_idx + 1:] if ln.strip())
+        if text:
+            blocks.append((start, end, text))
+    return blocks
+
+
+def _srt_to_ass(srt_path: Path, ass_path: Path, w: int, h: int, sub_cfg: dict):
+    """Convierte SRT a ASS con resolución REAL en el header (FontSize en píxeles
+    reales y predecibles) y estilo tipo caption: outline grueso, márgenes y wrap."""
+    font = sub_cfg.get("font", "Arial")
+    font_size = int(sub_cfg.get("font_size", 72))
+    position = sub_cfg.get("position", "bottom")
+
+    # Alignment ASS: 2=abajo-centro, 5=medio-centro, 8=arriba-centro
+    alignment = {"bottom": 2, "center": 5, "top": 8}.get(position, 2)
+    # Márgenes proporcionales al ancho/alto
+    margin_lr = max(int(w * 0.07), 40)         # ~7% laterales → evita que se corte
+    margin_v = max(int(h * 0.12), 80)          # separación del borde
+    outline = max(int(font_size * 0.06), 3)    # contorno grueso para legibilidad
+
+    blocks = _parse_srt(srt_path.read_text(encoding="utf-8", errors="ignore"))
+
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {w}
+PlayResY: {h}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,{font},{font_size},&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,{outline},1,{alignment},{margin_lr},{margin_lr},{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    events = "\n".join(
+        f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}"
+        for start, end, text in blocks
+    )
+    ass_path.write_text(header + events, encoding="utf-8")
+    return ass_path
+
+
 async def render_final(project_id: str, quality: str = "full") -> Path:
     meta = project_service.get_project(project_id)
     if not meta:
@@ -100,17 +162,13 @@ async def render_final(project_id: str, quality: str = "full") -> Path:
     video_label = "[0:v]"
 
     if has_subs and _check_subtitles_filter():
-        srt_esc = _escape_srt_path(sub_path)
         sub_cfg = config.get("subtitles", {})
-        filter_parts.append(
-            f"{video_label}subtitles={srt_esc}:force_style='"
-            f"FontName={sub_cfg.get('font', 'Arial')},"
-            f"FontSize={sub_cfg.get('font_size', 48)},"
-            f"PrimaryColour=&H00FFFFFF,"
-            f"OutlineColour=&H00000000,"
-            f"Outline=2,"
-            f"Alignment=2'[vsub]"
-        )
+        # Resolución real del video → ASS con PlayRes correcto (FontSize en px reales)
+        sub_w, sub_h = (1080, 1920) if config.get("aspect", "9:16") == "9:16" else (1920, 1080)
+        ass_path = sub_path.with_suffix(".ass")
+        _srt_to_ass(sub_path, ass_path, sub_w, sub_h, sub_cfg)
+        ass_esc = _escape_srt_path(ass_path)
+        filter_parts.append(f"{video_label}ass={ass_esc}[vsub]")
         video_label = "[vsub]"
     elif has_subs:
         log.warning("Subtitles skipped — FFmpeg lacks libass (subtitles filter)")
