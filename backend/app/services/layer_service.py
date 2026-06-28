@@ -422,16 +422,21 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
 
 async def _fetch_one_clip(query: str, dest_dir: Path, duration: float, aspect: str,
                           use_photos: bool) -> Path:
-    """Devuelve UN clip para `query` (foto Ken Burns o clip de Pexels). None si nada."""
-    if use_photos:
-        clips = await fetch_photo_clips(
-            query=query, dest_dir=dest_dir, count=1, duration=duration, aspect=aspect,
-        )
-        return clips[0] if clips else None
-    # Fuente de video (Pexels): pedimos varias y tomamos la 1ª que descargue bien
-    urls = await fetch_pexels_clips(query, count=3)
-    downloaded = await _download_clips(urls, dest_dir, "pex")
-    return downloaded[0] if downloaded else None
+    """Devuelve UN clip para `query` (foto Ken Burns o clip de Pexels). None si nada
+    o si falla (para no tumbar el ensamblaje: el caller cae a sus fallbacks)."""
+    try:
+        if use_photos:
+            clips = await photo_sources.fetch_photo_clips(
+                query=query, dest_dir=dest_dir, count=1, duration=duration, aspect=aspect,
+            )
+            return clips[0] if clips else None
+        # Fuente de video (Pexels): pedimos varias y tomamos la 1ª que descargue bien
+        urls = await fetch_pexels_clips(query, count=3)
+        downloaded = await _download_clips(urls, dest_dir, "pex")
+        return downloaded[0] if downloaded else None
+    except Exception as e:
+        log.warning(f"_fetch_one_clip falló para {query!r}: {e}")
+        return None
 
 
 async def assemble_video_layer_ab(project_id: str, config: ProjectConfig) -> Path:
