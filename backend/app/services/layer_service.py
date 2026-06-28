@@ -163,6 +163,72 @@ async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> P
     return output_path
 
 
+async def generate_scene_plan(project_id: str, config: ProjectConfig, scene_count: int = 6) -> list:
+    """Segmenta el GUION en tramos narrativos y elige keywords visuales para cada
+    tramo según lo que se dice ahí. Así la imagen pega con la narración.
+
+    Devuelve: [{"line": str, "visual_1": str, "visual_2": str}, ...]
+    El campo 'line' es solo para depurar/log; el render usa visual_1/visual_2.
+    """
+    import json
+
+    # 1) Recuperar el guion ya generado (no lo regeneramos)
+    script = config.script
+    if not script:
+        meta = project_service.get_project(project_id)
+        script = (meta or {}).get("config", {}).get("script", "")
+    if not script:
+        # Sin guion no hay encaje posible: caemos al modo topic-only
+        script = config.topic
+
+    # 2) Pedir a DeepSeek que segmente EL GUION y derive visuales de cada tramo
+    prompt = f"""Eres director de fotografía. Te doy el GUION de un vídeo vertical (9:16).
+Divídelo en EXACTAMENTE {scene_count} tramos consecutivos que cubran TODO el guion en orden.
+Para cada tramo, elige DOS keywords visuales en inglés para buscar stock footage en Pexels:
+- visual_1: el plano que ilustra LITERALMENTE lo que se dice en ese tramo
+- visual_2: un plano complementario distinto, también relacionado con ese tramo
+Las keywords deben derivar del CONTENIDO de cada tramo, no del tema general.
+Sé concreto y filmable (objetos, acciones, lugares reales).
+
+GUION:
+\"\"\"{script}\"\"\"
+
+Responde SOLO con un array JSON válido, sin markdown ni texto extra:
+[{{"line":"<fragmento del guion>","visual_1":"...","visual_2":"..."}}, ...]"""
+
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={"Authorization": f"Bearer {deepseek_key}",
+                     "Content-Type": "application/json"},
+            json={"model": "deepseek-chat", "max_tokens": 1200,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=40,
+        )
+    data = resp.json()
+    if resp.status_code != 200 or "choices" not in data:
+        raise RuntimeError(f"DeepSeek scene-plan error ({resp.status_code}): {data}")
+
+    raw = data["choices"][0]["message"]["content"].strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    # Robustez: si viene texto alrededor, recortar al primer '[' y último ']'
+    if "[" in raw and "]" in raw:
+        raw = raw[raw.index("["): raw.rindex("]") + 1]
+    scenes = json.loads(raw)
+
+    clean = []
+    for s in scenes[:scene_count]:
+        v1 = (s.get("visual_1") or config.topic).strip()
+        v2 = (s.get("visual_2") or v1).strip()
+        clean.append({"line": (s.get("line") or "").strip(), "visual_1": v1, "visual_2": v2})
+
+    # Si DeepSeek devolvió menos tramos de los pedidos, rellenar con el último
+    while len(clean) < scene_count and clean:
+        clean.append(clean[-1])
+    return clean
+
+
 async def fetch_pexels_clips(query: str, count: int = 8) -> list:
     pexels_key = os.getenv("PEXELS_API_KEY")
     if not pexels_key:
@@ -240,6 +306,11 @@ async def _get_audio_duration(path: Path) -> float:
 
 
 async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
+    # A/B split: las imágenes siguen el guion (2 visuales por escena). Requiere el
+    # guion ya generado; el orquestador corre script→audio antes que la capa de video.
+    if config.video.ab_split:
+        return await assemble_video_layer_ab(project_id, config)
+
     project_service.update_layer_status(project_id, "video", LayerStatus.pending)
     output_path = project_service.get_layer_path(project_id, "video")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,6 +412,104 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     project_service.update_layer_status(project_id, "video", LayerStatus.ready, {
         "clips": len(clips),
         "source": config.video.source,
+        "file": str(output_path),
+    })
+    return output_path
+
+
+async def _fetch_one_clip(query: str, dest_dir: Path, duration: float, aspect: str,
+                          use_photos: bool) -> Path:
+    """Devuelve UN clip para `query` (foto Ken Burns o clip de Pexels). None si nada."""
+    if use_photos:
+        clips = await fetch_photo_clips(
+            query=query, dest_dir=dest_dir, count=1, duration=duration, aspect=aspect,
+        )
+        return clips[0] if clips else None
+    # Fuente de video (Pexels): pedimos varias y tomamos la 1ª que descargue bien
+    urls = await fetch_pexels_clips(query, count=3)
+    downloaded = await _download_clips(urls, dest_dir, "pex")
+    return downloaded[0] if downloaded else None
+
+
+async def assemble_video_layer_ab(project_id: str, config: ProjectConfig) -> Path:
+    """Ensambla el video siguiendo el guion: segmenta en escenas y por cada una
+    baja 2 visuales (A=visual_1, B=visual_2) según lo que se narra ahí. Concatena
+    A,B,A,B… en orden para que la imagen pegue con la narración (encaje imagen-guion).
+    """
+    project_service.update_layer_status(project_id, "video", LayerStatus.pending)
+    output_path = project_service.get_layer_path(project_id, "video")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    aspect = config.aspect
+    use_photos = config.video.source in (VideoSource.photos, VideoSource.mixed_photos)
+    scene_count = max(int(config.video.scene_count or 6), 1)
+
+    # 1) Plan de escenas guiado por el guion
+    scenes = await generate_scene_plan(project_id, config, scene_count)
+    if not scenes:
+        project_service.update_layer_status(project_id, "video", LayerStatus.error, {
+            "error": "No se pudo segmentar el guion en escenas.",
+        })
+        return None
+
+    # 2) Duración por clip: reparte el audio entre todos los slots (2 por escena)
+    total_slots = len(scenes) * 2
+    clip_dur = float(config.video.clip_duration or 4)
+    audio_path = project_service.get_layer_path(project_id, "audio")
+    if audio_path.exists() and total_slots > 0:
+        audio_dur = await _get_audio_duration(audio_path)
+        if audio_dur > 0:
+            clip_dur = round(audio_dur / total_slots, 2)
+
+    # 3) Por cada escena, bajar visual_1 (A) y visual_2 (B) en orden
+    ab_dir = Path("projects") / project_id / "video" / "ab"
+    clips: list[Path] = []
+    for i, scene in enumerate(scenes):
+        for slot, key in (("a", "visual_1"), ("b", "visual_2")):
+            query = scene.get(key) or scene.get("visual_1") or config.topic
+            slot_dir = ab_dir / f"s{i:02d}_{slot}"
+            clip = await _fetch_one_clip(query, slot_dir, clip_dur, aspect, use_photos)
+            # Fallbacks: keyword del tema → reusar el último clip que sí salió
+            if clip is None:
+                clip = await _fetch_one_clip(config.topic, slot_dir, clip_dur, aspect, use_photos)
+            if clip is None and clips:
+                clip = clips[-1]
+            if clip is not None:
+                clips.append(clip)
+
+    if not clips:
+        project_service.update_layer_status(project_id, "video", LayerStatus.error, {
+            "error": "Sin clips disponibles para el A/B split. Configura PEXELS_API_KEY o PIXABAY_API_KEY.",
+        })
+        return None
+
+    # 4) Concatenar en orden y normalizar a la resolución del aspecto
+    list_file = ab_dir / "clips.txt"
+    list_file.parent.mkdir(parents=True, exist_ok=True)
+    list_file.write_text("\n".join(f"file '{c.resolve()}'" for c in clips))
+
+    w, h = (1080, 1920) if aspect == "9:16" else (1920, 1080)
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_file),
+        "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
+        "-c:v", "libx264", "-crf", "23",
+        "-an",
+        str(output_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+
+    project_service.update_layer_status(project_id, "video", LayerStatus.ready, {
+        "clips": len(clips),
+        "source": config.video.source,
+        "ab_split": True,
+        "scene_count": len(scenes),
+        # Resumen para auditar el encaje imagen-narración desde la UI/API
+        "scene_lines": [s.get("line", "")[:80] for s in scenes],
+        "scene_visuals": [{"a": s.get("visual_1", ""), "b": s.get("visual_2", "")} for s in scenes],
         "file": str(output_path),
     })
     return output_path

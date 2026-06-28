@@ -46,6 +46,10 @@ class VideoLayerConfig(BaseModel):
     source: VideoSource = VideoSource.mixed
     clip_duration: int = 4
     local_folder: Optional[str] = None
+    # A/B split: segmenta el guion y baja 2 visuales (A/B) por escena para que
+    # la imagen siga lo que narra el locutor. Off por defecto (sin cambio de comportamiento).
+    ab_split: bool = False
+    scene_count: int = 6
 
 class AudioLayerConfig(BaseModel):
     voice: VoiceModel = VoiceModel.alvaro

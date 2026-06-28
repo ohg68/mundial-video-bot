@@ -90,12 +90,12 @@ def _owns(project_id: str, chat_id: int):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _build_config(title: str, topic: str, source: str = "pexels") -> ProjectConfig:
+def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool = False) -> ProjectConfig:
     return ProjectConfig(
         title=title,
         topic=topic,
         aspect="9:16",
-        video=VideoLayerConfig(source=VideoSource(source), clip_duration=4),
+        video=VideoLayerConfig(source=VideoSource(source), clip_duration=4, ab_split=ab_split),
         audio=AudioLayerConfig(speed=1.1, volume=0.9),
         music=MusicLayerConfig(volume=0.25, fade_in=2, fade_out=3),
         subtitles=SubtitleLayerConfig(font_size=48, color="white", outline=True, position="bottom"),
@@ -127,12 +127,12 @@ async def _send_video(bot, chat_id: int, path: Path, caption: str = ""):
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
-async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str):
+async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str, ab_split: bool = False):
     """Genera el video completo y lo entrega por Telegram."""
     project_id = None
     try:
         # 1. Crear proyecto (owner = chat_id de Telegram para aislamiento por usuario)
-        config = _build_config(title, topic, source)
+        config = _build_config(title, topic, source, ab_split=ab_split)
         meta = project_service.create_project(config, owner_id=chat_id)
         project_id = meta["id"]
 
@@ -523,6 +523,7 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📷 Fotos de Internet (Ken Burns)", callback_data="src_photos")],
         [InlineKeyboardButton("🎬 Video Clips (Pexels)", callback_data="src_pexels")],
         [InlineKeyboardButton("🔀 Mix Fotos + Video", callback_data="src_mixed_photos")],
+        [InlineKeyboardButton("🎯 A/B guiado (imágenes siguen el guion)", callback_data="src_ab")],
     ]
     await update.message.reply_text(
         f"✅ Tema: *{context.user_data['topic']}*\n\n"
@@ -537,12 +538,14 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # ab_split=True hace que las imágenes sigan el guion (2 visuales por escena).
     src_map = {
-        "src_photos": ("photos", "📷 Fotos de Internet"),
-        "src_pexels": ("pexels", "🎬 Video Clips Pexels"),
-        "src_mixed_photos": ("mixed_photos", "🔀 Mix Fotos + Video"),
+        "src_photos": ("photos", "📷 Fotos de Internet", False),
+        "src_pexels": ("pexels", "🎬 Video Clips Pexels", False),
+        "src_mixed_photos": ("mixed_photos", "🔀 Mix Fotos + Video", False),
+        "src_ab": ("photos", "🎯 A/B guiado por guion", True),
     }
-    source, label = src_map.get(query.data, ("pexels", "🎬 Video Clips Pexels"))
+    source, label, ab_split = src_map.get(query.data, ("pexels", "🎬 Video Clips Pexels", False))
 
     title = context.user_data.get("title", "Video Mundial 2026")
     topic = context.user_data.get("topic", "Mundial 2026")
@@ -556,7 +559,7 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-    asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source))
+    asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source, ab_split=ab_split))
     return ConversationHandler.END
 
 
