@@ -212,10 +212,13 @@ Responde SOLO con un array JSON válido, sin markdown ni texto extra:
 
     raw = data["choices"][0]["message"]["content"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
-    # Robustez: si viene texto alrededor, recortar al primer '[' y último ']'
-    if "[" in raw and "]" in raw:
-        raw = raw[raw.index("["): raw.rindex("]") + 1]
-    scenes = json.loads(raw)
+    # Robustez: DeepSeek a veces añade prosa antes/después del array (a veces con
+    # corchetes propios). Arrancamos en el primer '[' y usamos raw_decode, que
+    # parsea SOLO el primer valor JSON válido e ignora cualquier texto sobrante.
+    start = raw.find("[")
+    if start == -1:
+        raise RuntimeError(f"DeepSeek scene-plan: respuesta sin array JSON: {raw[:200]}")
+    scenes, _ = json.JSONDecoder().raw_decode(raw[start:])
 
     clean = []
     for s in scenes[:scene_count]:
@@ -444,8 +447,16 @@ async def assemble_video_layer_ab(project_id: str, config: ProjectConfig) -> Pat
     use_photos = config.video.source in (VideoSource.photos, VideoSource.mixed_photos)
     scene_count = max(int(config.video.scene_count or 6), 1)
 
-    # 1) Plan de escenas guiado por el guion
-    scenes = await generate_scene_plan(project_id, config, scene_count)
+    # 1) Plan de escenas guiado por el guion. Si DeepSeek/parsing falla, marcar
+    #    error (en BackgroundTask la excepción se perdería y la capa quedaría pending).
+    try:
+        scenes = await generate_scene_plan(project_id, config, scene_count)
+    except Exception as e:
+        log.error(f"scene-plan falló [{project_id}]: {e}", exc_info=True)
+        project_service.update_layer_status(project_id, "video", LayerStatus.error, {
+            "error": f"No se pudo generar el plan de escenas: {str(e)[:200]}",
+        })
+        return None
     if not scenes:
         project_service.update_layer_status(project_id, "video", LayerStatus.error, {
             "error": "No se pudo segmentar el guion en escenas.",
