@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -234,6 +235,13 @@ async def _transcribe_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
         audio_path.unlink(missing_ok=True)
 
 
+def _latest_project(chat_id: int) -> Optional[dict]:
+    """Proyecto más reciente del chat (un ID no se puede dictar de forma confiable por voz)."""
+    owner_filter = chat_id if _allowed_chats() else None
+    projects = project_service.list_projects(owner_id=owner_filter)
+    return projects[0] if projects else None
+
+
 async def on_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja notas de voz sueltas (fuera de conversación):
     transcribe → interpreta intención → actúa."""
@@ -281,18 +289,163 @@ async def on_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source))
+        return
 
-    elif action == "list":
+    if action == "list":
         await status.delete()
         await cmd_ultimos(update, context)
+        return
 
-    else:
-        await status.edit_text(
-            "🤔 No entendí qué querías hacer.\n\n"
-            "Prueba diciendo algo como:\n"
-            "_\"Crea un video sobre la final del Mundial con fotos\"_",
+    # El resto de las acciones operan sobre el proyecto más reciente del chat
+    if action in ("status", "render", "download", "regenerate", "regenerate_script", "request_upload"):
+        proj = _latest_project(chat_id)
+        if not proj:
+            await status.edit_text("🤔 No tienes proyectos aún. Decí algo como _\"crea un video sobre...\"_ para empezar.", parse_mode="Markdown")
+            return
+        project_id = proj["id"]
+
+        if action == "status":
+            await status.delete()
+            await update.message.reply_text(_format_estado(proj), parse_mode="Markdown")
+
+        elif action == "render":
+            await status.edit_text(f"⚡ Renderizando *{proj['title']}*...", parse_mode="Markdown")
+            asyncio.create_task(_voice_render(context.application.bot, chat_id, proj))
+
+        elif action == "download":
+            await status.edit_text("📤 Buscando tu video...")
+            found = await _deliver_render(context.application.bot, chat_id, proj)
+            await status.delete()
+            if not found:
+                await update.message.reply_text(
+                    f"❌ Todavía no hay render de *{proj['title']}*. Pedime \"renderizalo\" primero.",
+                    parse_mode="Markdown",
+                )
+
+        elif action == "regenerate":
+            layer = intent.get("layer")
+            if layer not in ("audio", "video", "subtitles"):
+                await status.edit_text("🤔 No entendí qué capa regenerar (audio, video o subtítulos).")
+                return
+            config = ProjectConfig(**proj.get("config", {}))
+            await status.edit_text(f"🔄 Regenerando {layer} de *{proj['title']}*...", parse_mode="Markdown")
+            asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, layer, config))
+
+        elif action == "regenerate_script":
+            config = ProjectConfig(**proj.get("config", {}))
+            await status.edit_text(f"🤖 Regenerando guión de *{proj['title']}*...", parse_mode="Markdown")
+            asyncio.create_task(_regen_script(context.application.bot, chat_id, project_id, config))
+
+        elif action == "request_upload":
+            layer = intent.get("layer")
+            if layer not in ("music", "overlay"):
+                await status.edit_text("🤔 No entendí si era música o un logo/overlay.")
+                return
+            context.user_data["pending_upload"] = {"layer": layer, "project_id": project_id}
+            label = "el archivo de audio (mp3)" if layer == "music" else "la imagen del logo (png/jpg)"
+            await status.edit_text(
+                f"📤 Mandame {label} para *{proj['title']}* y lo agrego.",
+                parse_mode="Markdown",
+            )
+        return
+
+    await status.edit_text(
+        "🤔 No entendí qué querías hacer.\n\n"
+        "Prueba diciendo algo como:\n"
+        "_\"Crea un video sobre la final del Mundial con fotos\"_, "
+        "_\"¿cómo va mi video?\"_, _\"renderizalo\"_ o _\"ponle música\"_.",
+        parse_mode="Markdown",
+    )
+
+
+async def _voice_render(bot, chat_id: int, meta: dict):
+    """Renderiza el proyecto y entrega el resultado (disparado por voz)."""
+    project_id = meta["id"]
+    try:
+        output = await render_service.render_final(project_id, quality="full")
+        size_mb = output.stat().st_size / 1024 / 1024
+        await bot.send_message(chat_id, f"✅ Render listo ({size_mb:.1f}MB). Enviando...")
+        await _deliver_render(bot, chat_id, meta)
+    except Exception as e:
+        log.error(f"Voice render error [project={project_id}]: {e}", exc_info=True)
+        await bot.send_message(
+            chat_id,
+            f"❌ Error renderizando: {str(e)[:200]}",
             parse_mode="Markdown",
         )
+
+
+async def on_request_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Botón '📤 Subir archivo' de una capa: pide el archivo (música u overlay)."""
+    query = update.callback_query
+    await query.answer()
+
+    data_parts = query.data.split("_")
+    layer = data_parts[1]
+    project_id = "_".join(data_parts[2:])
+    chat_id = query.message.chat_id
+
+    meta = _owns(project_id, chat_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado o no es tuyo.")
+        return
+
+    context.user_data["pending_upload"] = {"layer": layer, "project_id": project_id}
+    label = "el archivo de audio (mp3)" if layer == "music" else "la imagen del logo (png/jpg)"
+    await query.edit_message_text(f"📤 Mandame {label} y lo agrego a *{meta['title']}*.", parse_mode="Markdown")
+
+
+async def on_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recibe un archivo (audio/imagen/documento) cuando hay una carga pendiente."""
+    pending = context.user_data.get("pending_upload")
+    if not pending:
+        return  # sin carga pendiente: el archivo se ignora
+
+    layer = pending["layer"]
+    project_id = pending["project_id"]
+    meta = project_service.get_project(project_id)
+    if not meta:
+        context.user_data.pop("pending_upload", None)
+        await update.message.reply_text("❌ El proyecto ya no existe.")
+        return
+
+    msg = update.message
+    tg_file = None
+    suffix = ""
+    if msg.audio:
+        tg_file = await msg.audio.get_file()
+        suffix = Path(msg.audio.file_name or "audio.mp3").suffix or ".mp3"
+    elif msg.voice:
+        tg_file = await msg.voice.get_file()
+        suffix = ".ogg"
+    elif msg.photo:
+        tg_file = await msg.photo[-1].get_file()
+        suffix = ".jpg"
+    elif msg.document:
+        tg_file = await msg.document.get_file()
+        suffix = Path(msg.document.file_name or "").suffix or ""
+
+    if not tg_file:
+        await update.message.reply_text("🤔 No reconocí ese archivo. Mandalo como audio o imagen.")
+        return
+
+    tmp_dir = Path("projects") / "_uploads"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f"{project_id}_{layer}{suffix}"
+    await tg_file.download_to_drive(str(tmp_path))
+
+    try:
+        project_service.replace_layer_file(project_id, layer, str(tmp_path))
+    finally:
+        tmp_path.unlink(missing_ok=True)
+        context.user_data.pop("pending_upload", None)
+
+    label = "Música" if layer == "music" else "Logo/overlay"
+    await update.message.reply_text(
+        f"✅ {label} agregado a *{meta['title']}*.\n"
+        f"Decí \"renderizalo\" o usa el botón de render para verlo en el video.",
+        parse_mode="Markdown",
+    )
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
@@ -448,22 +601,9 @@ async def cmd_ultimos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 cmd_listar = cmd_ultimos
 
 
-async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _guard(update):
-        return
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "Uso: `/estado ID_proyecto`", parse_mode="Markdown"
-        )
-        return
-
-    project_id = args[0]
-    meta = _owns(project_id, update.effective_chat.id)
-    if not meta:
-        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
-        return
-
+def _format_estado(meta: dict) -> str:
+    """Construye el texto de estado de un proyecto (usado por /estado y por voz)."""
+    project_id = meta["id"]
     layers = meta.get("layers", {})
     info = meta.get("layer_info", {})
     icons = {"ready": "✅", "pending": "⏳", "error": "❌", "empty": "⬜"}
@@ -492,7 +632,42 @@ async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         lines.append("\n⬜ Sin render aún")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    return "\n".join(lines)
+
+
+async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _guard(update):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Uso: `/estado ID_proyecto`", parse_mode="Markdown"
+        )
+        return
+
+    project_id = args[0]
+    meta = _owns(project_id, update.effective_chat.id)
+    if not meta:
+        await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
+        return
+
+    await update.message.reply_text(_format_estado(meta), parse_mode="Markdown")
+
+
+async def _deliver_render(bot, chat_id: int, meta: dict) -> bool:
+    """Busca el render (final o preview) de un proyecto y lo envía. Devuelve True si lo encontró."""
+    project_id = meta["id"]
+    output = Path("projects") / project_id / "output" / "final.mp4"
+    if not output.exists():
+        output = Path("projects") / project_id / "output" / "preview.mp4"
+    if not output.exists():
+        return False
+
+    title = meta.get("title", project_id)
+    topic = meta.get("topic", "")
+    caption = f"🎬 *{title}*\n_{topic}_\n\n`ID: {project_id}`"
+    await _send_video(bot, chat_id, output, caption)
+    return True
 
 
 async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -511,25 +686,15 @@ async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Proyecto `{project_id}` no encontrado o no es tuyo.", parse_mode="Markdown")
         return
 
-    output = Path("projects") / project_id / "output" / "final.mp4"
-    if not output.exists():
-        output = Path("projects") / project_id / "output" / "preview.mp4"
-
-    if not output.exists():
+    msg = await update.message.reply_text("📤 Enviando video, espera...")
+    found = await _deliver_render(context.application.bot, update.effective_chat.id, meta)
+    await msg.delete()
+    if not found:
         await update.message.reply_text(
             f"❌ No hay render para `{project_id}`.\n"
             "Verifica con /estado que el video esté listo.",
             parse_mode="Markdown",
         )
-        return
-
-    title = meta.get("title", project_id)
-    topic = meta.get("topic", "")
-
-    msg = await update.message.reply_text("📤 Enviando video, espera...")
-    caption = f"🎬 *{title}*\n_{topic}_\n\n`ID: {project_id}`"
-    await _send_video(context.application.bot, update.effective_chat.id, output, caption)
-    await msg.delete()
 
 
 # ── Vistas reutilizables (comando o botón) ─────────────────────────────────────
@@ -1181,6 +1346,7 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_subrender, pattern="^subrender_"))
     application.add_handler(CallbackQueryHandler(on_setvoice, pattern="^setvoice_"))
     application.add_handler(CallbackQueryHandler(on_back_capas, pattern="^back_capas_"))
+    application.add_handler(CallbackQueryHandler(on_request_upload, pattern="^upload_"))
 
     # Script editing conversation (debe ir ANTES de los handlers individuales)
     script_conv = ConversationHandler(
@@ -1199,6 +1365,10 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_regen_script, pattern="^regen_script_"))
 
     application.add_handler(conv)
+
+    # Carga de archivo (música/overlay) cuando hay un upload pendiente
+    # (disparado por el botón "📤 Subir archivo" o por una orden de voz).
+    application.add_handler(MessageHandler(filters.AUDIO | filters.Document.ALL | filters.PHOTO, on_file_upload))
 
     # Notas de voz sueltas (fuera de conversación): comando por voz.
     # Va al final para que la conversación /nuevo capture la voz primero.

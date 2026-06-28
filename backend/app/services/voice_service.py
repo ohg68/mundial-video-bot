@@ -50,11 +50,19 @@ async def transcribe(audio_path: Path) -> str:
 
 async def extract_intent(text: str) -> dict:
     """Interpreta el texto transcrito y extrae la intención del usuario.
-    Devuelve un dict con 'action' y, según el caso, title/topic/source/project_id.
+    Devuelve un dict con 'action' y, según el caso, campos adicionales
+    (title/topic/source para "create"; "layer" para "regenerate"/"request_upload").
 
-    Acciones posibles:
+    Acciones posibles (todas salvo "create" operan sobre el proyecto más
+    reciente del chat, porque un ID de proyecto no se puede dictar de forma confiable):
       - "create": crear un video nuevo (title, topic, source)
       - "list": listar proyectos
+      - "status": estado del proyecto más reciente
+      - "render": renderizar el proyecto más reciente
+      - "download": descargar el render del proyecto más reciente
+      - "regenerate": regenerar una capa (layer: audio|video|subtitles)
+      - "regenerate_script": regenerar el guión
+      - "request_upload": el usuario quiere poner música u overlay (layer: music|overlay)
       - "unknown": no se entendió
     """
     deepseek_key = os.getenv("DEEPSEEK_API_KEY")
@@ -62,14 +70,14 @@ async def extract_intent(text: str) -> dict:
         # Sin LLM, asumimos que todo es creación de video con el texto como tema
         return {"action": "create", "title": text[:60], "topic": text, "source": "pexels"}
 
-    prompt = f"""Eres el intérprete de comandos de voz de LayerCut, un bot que genera videos del Mundial 2026.
+    prompt = f"""Eres el intérprete de comandos de voz de LayerCut, un bot que genera videos cortos.
 
 El usuario dijo por voz:
 "{text}"
 
 Determina su intención y responde SOLO con un JSON válido (sin markdown, sin explicación):
 
-Si quiere CREAR un video:
+Si quiere CREAR un video nuevo:
 {{"action": "create", "title": "<título corto y atractivo>", "topic": "<descripción del contenido>", "source": "<photos|pexels|mixed_photos>"}}
 
 Reglas para "source":
@@ -79,6 +87,24 @@ Reglas para "source":
 
 Si quiere VER/LISTAR sus proyectos:
 {{"action": "list"}}
+
+Si pregunta por el estado/progreso de su video (ej: "¿cómo va mi video?", "¿ya está listo?"):
+{{"action": "status"}}
+
+Si pide renderizar o generar el video final (ej: "renderizalo", "generá el video"):
+{{"action": "render"}}
+
+Si pide que le mandes/descargues el video (ej: "mandame el video", "descargalo"):
+{{"action": "download"}}
+
+Si pide regenerar/rehacer una capa específica (ej: "cambiá el audio", "rehacé el video"):
+{{"action": "regenerate", "layer": "<audio|video|subtitles>"}}
+
+Si pide regenerar el guión (ej: "rehacé el guión", "cambiá el texto"):
+{{"action": "regenerate_script"}}
+
+Si pide agregar/poner música o un logo/overlay (ej: "ponle música", "agregale mi logo"):
+{{"action": "request_upload", "layer": "<music|overlay>"}}
 
 Si no se entiende:
 {{"action": "unknown"}}"""
