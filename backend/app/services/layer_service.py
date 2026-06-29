@@ -104,26 +104,81 @@ def _fmt_ts(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _build_srt_by_duration(text: str, total_seconds: float, words_per_cue: int = 7) -> str:
-    """Reparte el texto en subtitulos proporcionalmente a la duracion del audio.
+def _voice_range(path: Path, total: float) -> tuple:
+    """Detecta el rango (inicio, fin) donde realmente hay voz, quitando silencios.
 
-    Google TTS no devuelve tiempos por palabra de forma sencilla, asi que
-    repartimos el guion segun cuantas palabras lleva cada tramo. Para narracion
-    corrida queda bien sincronizado. words_per_cue=7 da lineas tipo karaoke.
+    Usa el filtro silencedetect de ffmpeg. Si no detecta nada, devuelve el
+    audio completo. Esto evita que los subtítulos arranquen en 0 cuando el
+    audio tiene un pequeño silencio inicial, reduciendo el desfase.
+    """
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
+             "-af", "silencedetect=noise=-35dB:d=0.3", "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+        err = proc.stderr
+        starts = []
+        ends = []
+        for line in err.splitlines():
+            if "silence_end" in line:
+                try:
+                    starts.append(float(line.split("silence_end:")[1].split("|")[0].strip()))
+                except Exception:
+                    pass
+            if "silence_start" in line:
+                try:
+                    ends.append(float(line.split("silence_start:")[1].strip()))
+                except Exception:
+                    pass
+        # Inicio de voz = primer fin de silencio (si el audio empieza en silencio).
+        voice_start = starts[0] if starts else 0.0
+        # Fin de voz = último inicio de silencio (si el audio termina en silencio).
+        voice_end = ends[-1] if ends else total
+        # Sanidad: que el rango tenga sentido.
+        if voice_end <= voice_start or voice_end > total or voice_start < 0:
+            return (0.0, total)
+        # No recortar de más: dejar un pequeño margen.
+        return (max(0.0, voice_start - 0.1), min(total, voice_end + 0.1))
+    except Exception:
+        return (0.0, total)
+
+
+def _build_srt_by_duration(text: str, total_seconds: float, words_per_cue: int = 6,
+                           voice_start: float = 0.0, voice_end: float = None) -> str:
+    """Reparte el texto en subtitulos dentro del rango de voz, ponderando por
+    longitud de palabra (las palabras largas duran mas). Mas preciso que un
+    reparto uniforme, aunque no tan exacto como Whisper.
     """
     words = text.split()
     if not words or total_seconds <= 0:
         return ""
-    n = len(words)
+    if voice_end is None or voice_end <= voice_start:
+        voice_end = total_seconds
+    span = voice_end - voice_start
+    if span <= 0:
+        span = total_seconds
+        voice_start = 0.0
+
+    weights = [max(1, len(w)) for w in words]
+    total_w = sum(weights)
+    # tiempo de borde de cada palabra segun peso acumulado
+    times = [voice_start]
+    acc = 0
+    for w in weights:
+        acc += w
+        times.append(voice_start + (acc / total_w) * span)
+
     lines = []
     idx = 1
     i = 0
+    n = len(words)
     while i < n:
-        group = words[i:i + words_per_cue]
-        start = (i / n) * total_seconds
-        end = (min(i + words_per_cue, n) / n) * total_seconds
-        lines.append(f"{idx}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{' '.join(group)}\n")
-        i += words_per_cue
+        j = min(i + words_per_cue, n)
+        start = times[i]
+        end = times[j]
+        lines.append(f"{idx}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{' '.join(words[i:j])}\n")
+        i = j
         idx += 1
     return "\n".join(lines)
 
@@ -202,10 +257,11 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
     await conv.communicate()
     tmp_mp3.unlink(missing_ok=True)
 
-    # Subtitulos repartidos segun la duracion real del audio generado.
+    # Subtitulos repartidos dentro del rango real de voz del audio generado.
     dur = _audio_duration(output_path)
     if dur > 0:
-        srt = _build_srt_by_duration(script, dur)
+        v_start, v_end = _voice_range(output_path, dur)
+        srt = _build_srt_by_duration(script, dur, voice_start=v_start, voice_end=v_end)
         sub_path = project_service.get_layer_path(project_id, "subtitles")
         sub_path.parent.mkdir(parents=True, exist_ok=True)
         if sub_path.suffix.lower() != ".srt":
