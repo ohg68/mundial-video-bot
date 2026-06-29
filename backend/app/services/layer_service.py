@@ -1,12 +1,20 @@
 import os
 import httpx
 import asyncio
+import base64
 import subprocess
 from pathlib import Path
 from app.models.project import ProjectConfig, VideoSource, LayerStatus
 from app.services import project_service
 
 LOCAL_CLIPS_DIR = Path(os.getenv("LOCAL_CLIPS_DIR", "clips"))
+
+# Voz por defecto de ElevenLabs. Se puede sobreescribir con la variable de
+# entorno ELEVENLABS_VOICE_ID o desde la config del proyecto.
+# "Sarah" multilingue funciona bien en espanol; cambiala por la que prefieras
+# desde tu panel de ElevenLabs (Voice Lab -> copiar Voice ID).
+DEFAULT_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
 
 
 async def generate_script(project_id: str, config: ProjectConfig) -> str:
@@ -55,153 +63,160 @@ Responde SOLO con el guion, sin introduccion ni explicacion."""
     return script
 
 
-def _edge_rate(speed: float) -> str:
-    """Convierte un multiplicador de velocidad (1.0 = normal) al formato +N%/-N% de edge-tts."""
-    pct = int(round((speed - 1) * 100))
-    return f"+{pct}%" if pct >= 0 else f"{pct}%"
+def _fmt_ts(t: float) -> str:
+    """Segundos -> formato SRT 'HH:MM:SS,mmm'."""
+    if t < 0:
+        t = 0
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - int(t)) * 1000))
+    if ms == 1000:
+        ms = 0
+        s += 1
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _build_srt_from_chars(chars, starts, ends, words_per_cue: int = 4) -> str:
+    """Convierte los tiempos por caracter de ElevenLabs en un .srt agrupado."""
+    words = []
+    cur_word = ""
+    cur_start = None
+    cur_end = None
+    for ch, st, en in zip(chars, starts, ends):
+        if ch in (" ", "\n", "\t"):
+            if cur_word:
+                words.append((cur_word, cur_start, cur_end))
+                cur_word = ""
+                cur_start = None
+        else:
+            if cur_start is None:
+                cur_start = st
+            cur_word += ch
+            cur_end = en
+    if cur_word:
+        words.append((cur_word, cur_start, cur_end))
+
+    lines = []
+    idx = 1
+    for i in range(0, len(words), words_per_cue):
+        group = words[i:i + words_per_cue]
+        if not group:
+            continue
+        start = group[0][1] if group[0][1] is not None else 0.0
+        end = group[-1][2] if group[-1][2] is not None else start + 1.0
+        text = " ".join(w[0] for w in group)
+        lines.append(f"{idx}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{text}\n")
+        idx += 1
+    return "\n".join(lines)
 
 
 async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
+    """Genera la narracion con ElevenLabs y los subtitulos sincronizados."""
     project_service.update_layer_status(project_id, "audio", LayerStatus.pending)
     script = config.script or await generate_script(project_id, config)
     output_path = project_service.get_layer_path(project_id, "audio")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    voice = config.audio.voice.value if config.audio.custom_file is None else None
-
     if config.audio.custom_file:
-        # Audio propio: copiar tal cual. Los subtítulos no se pueden sincronizar
-        # automáticamente con un audio externo (no hay timings de edge-tts).
         import shutil
         shutil.copy2(config.audio.custom_file, output_path)
-    else:
-        rate = _edge_rate(config.audio.speed)
-        # Generar AUDIO y SUBTÍTULOS en la MISMA llamada a edge-tts: así los
-        # timings del .vtt corresponden exactamente a la narración sintetizada.
-        # (Antes los subtítulos se generaban aparte con "placeholder" y no
-        # coincidían con el audio.)
-        sub_path = project_service.get_layer_path(project_id, "subtitles")
-        sub_path.parent.mkdir(parents=True, exist_ok=True)
+        project_service.update_layer_status(project_id, "audio", LayerStatus.ready, {
+            "voice": "custom",
+            "file": str(output_path),
+        })
+        return output_path
 
-        tmp_path = output_path.with_suffix(".tmp.mp3")
-        proc = await asyncio.create_subprocess_exec(
-            "edge-tts",
-            "--voice", voice,
-            "--rate", rate,
-            "--text", script,
-            "--write-media", str(tmp_path),
-            "--write-subtitles", str(sub_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise RuntimeError("Falta la variable de entorno ELEVENLABS_API_KEY")
+
+    voice_id = getattr(config.audio, "voice_id", None) or DEFAULT_VOICE_ID
+
+    def _synthesize():
+        from elevenlabs.client import ElevenLabs
+        client = ElevenLabs(api_key=api_key)
+        return client.text_to_speech.convert_with_timestamps(
+            voice_id=voice_id,
+            text=script,
+            model_id=ELEVENLABS_MODEL,
+            output_format="mp3_44100_128",
         )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            tmp_path.unlink(missing_ok=True)
-            raise RuntimeError(f"edge-tts error: {stderr.decode()[-1000:]}")
 
-        # Convertir a mp3 válido con ffmpeg (edge-tts escribe un contenedor que
-        # algunos reproductores/filtros no leen bien sin re-encode).
-        conv = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-i", str(tmp_path),
-            "-acodec", "libmp3lame", "-q:a", "2",
-            str(output_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await conv.communicate()
-        tmp_path.unlink(missing_ok=True)
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, _synthesize)
+    except Exception as e:
+        raise RuntimeError(f"ElevenLabs error: {e}")
 
-        # Marcar la capa de subtítulos como lista (se generó junto al audio).
-        if sub_path.exists() and sub_path.stat().st_size > 0:
+    def _get(obj, *names, default=None):
+        for n in names:
+            if isinstance(obj, dict) and n in obj:
+                return obj[n]
+            if hasattr(obj, n):
+                return getattr(obj, n)
+        return default
+
+    audio_b64 = _get(result, "audio_base_64", "audio_base64")
+    alignment = _get(result, "alignment")
+
+    if not audio_b64:
+        raise RuntimeError("ElevenLabs no devolvio audio")
+
+    tmp_mp3 = output_path.with_suffix(".raw.mp3")
+    tmp_mp3.write_bytes(base64.b64decode(audio_b64))
+
+    conv = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-i", str(tmp_mp3),
+        "-acodec", "libmp3lame", "-q:a", "2",
+        str(output_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await conv.communicate()
+    tmp_mp3.unlink(missing_ok=True)
+
+    if alignment is not None:
+        chars = _get(alignment, "characters", default=[])
+        starts = _get(alignment, "character_start_times_seconds",
+                      "character_start_times", default=[])
+        ends = _get(alignment, "character_end_times_seconds",
+                    "character_end_times", default=[])
+        if chars and starts and ends:
+            srt = _build_srt_from_chars(list(chars), list(starts), list(ends))
+            sub_path = project_service.get_layer_path(project_id, "subtitles")
+            sub_path.parent.mkdir(parents=True, exist_ok=True)
+            if sub_path.suffix.lower() != ".srt":
+                sub_path = sub_path.with_suffix(".srt")
+            sub_path.write_text(srt, encoding="utf-8")
             project_service.update_layer_status(project_id, "subtitles", LayerStatus.ready, {
                 "file": str(sub_path),
                 "synced_with": "audio",
             })
 
     project_service.update_layer_status(project_id, "audio", LayerStatus.ready, {
-        "voice": voice or "custom",
+        "voice": voice_id,
         "file": str(output_path),
     })
     return output_path
 
 
 async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> Path:
-    """Genera subtítulos sincronizados con la narración.
+    """Devuelve los subtitulos generados junto al audio."""
+    sub_path = project_service.get_layer_path(project_id, "subtitles")
+    candidates = [sub_path, sub_path.with_suffix(".srt"), sub_path.with_suffix(".vtt")]
+    for c in candidates:
+        if c.exists() and c.stat().st_size > 0:
+            project_service.update_layer_status(project_id, "subtitles", LayerStatus.ready, {
+                "file": str(c),
+                "synced_with": "audio",
+            })
+            return c
 
-    Los subtítulos de edge-tts solo coinciden con el audio si se sintetizan con
-    el MISMO texto, voz y velocidad. Por eso, para voces edge-tts, lo correcto
-    es generarlos junto al audio (ver generate_audio). Esta función:
-
-      - Si los subtítulos ya existen (generados con el audio): los devuelve.
-      - Si no existen pero hay guion y voz edge-tts: los regenera con el guion real.
-      - Si el audio es un archivo propio del usuario: no puede sincronizar
-        automáticamente y deja la capa marcada como no disponible.
-    """
-    output_path = project_service.get_layer_path(project_id, "subtitles")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Si ya se generaron junto al audio, no hay nada que hacer.
-    if output_path.exists() and output_path.stat().st_size > 0:
-        project_service.update_layer_status(project_id, "subtitles", LayerStatus.ready, {
-            "file": str(output_path),
-            "synced_with": "audio",
-        })
-        return output_path
-
-    project_service.update_layer_status(project_id, "subtitles", LayerStatus.pending)
-
-    # Recuperar config si no se pasó.
-    if config is None:
-        meta = project_service.get_project(project_id)
-        cfg = meta.get("config", {}) if meta else {}
-        script = cfg.get("script")
-        audio_cfg = cfg.get("audio", {})
-        voice = audio_cfg.get("voice")
-        speed = audio_cfg.get("speed", 1.0)
-        custom_file = audio_cfg.get("custom_file")
-    else:
-        script = config.script
-        voice = config.audio.voice.value if config.audio.custom_file is None else None
-        speed = config.audio.speed
-        custom_file = config.audio.custom_file
-
-    # Audio propio: no hay forma de derivar timings automáticamente.
-    if custom_file or not voice:
-        project_service.update_layer_status(project_id, "subtitles", LayerStatus.error, {
-            "error": "No se pueden generar subtítulos sincronizados para audio personalizado. "
-                     "Sube un archivo de subtítulos manualmente.",
-        })
-        return None
-
-    if not script:
-        project_service.update_layer_status(project_id, "subtitles", LayerStatus.error, {
-            "error": "No hay guion disponible para generar subtítulos.",
-        })
-        return None
-
-    rate = _edge_rate(speed)
-    # Regenerar con el GUION REAL (no 'placeholder') y la misma voz/velocidad.
-    proc = await asyncio.create_subprocess_exec(
-        "edge-tts",
-        "--voice", voice,
-        "--rate", rate,
-        "--text", script,
-        "--write-subtitles", str(output_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        project_service.update_layer_status(project_id, "subtitles", LayerStatus.error, {
-            "error": f"edge-tts error: {stderr.decode()[-500:]}",
-        })
-        return None
-
-    project_service.update_layer_status(project_id, "subtitles", LayerStatus.ready, {
-        "file": str(output_path),
-        "synced_with": "regenerated",
+    project_service.update_layer_status(project_id, "subtitles", LayerStatus.error, {
+        "error": "Los subtitulos se generan junto con el audio. Genera primero la capa de audio.",
     })
-    return output_path
+    return None
 
 
 async def fetch_pexels_clips(query: str, count: int = 8) -> list:
@@ -236,7 +251,6 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             clips = list(clips_dir.glob("*.mp4"))[:8]
 
     if config.video.source in (VideoSource.pexels, VideoSource.mixed) and len(clips) < 8:
-        # Use only first 4 words of topic for Pexels search
         pexels_query = " ".join(config.topic.split()[:4])
         pexels_urls = await fetch_pexels_clips(pexels_query, 8 - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
@@ -254,10 +268,6 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         })
         return None
 
-    # Normalizar CADA clip a 1080x1920 por separado antes de concatenar.
-    # El concat demuxer asume codec/timebase/resolución idénticos; los clips de
-    # Pexels vienen en tamaños distintos, así que normalizarlos uno a uno evita
-    # saltos y fallos silenciosos del concat directo.
     norm_dir = Path("projects") / project_id / "video" / "normalized"
     norm_dir.mkdir(parents=True, exist_ok=True)
     norm_clips = []
@@ -288,7 +298,6 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     list_file = Path("projects") / project_id / "video" / "clips.txt"
     list_file.write_text("\n".join(f"file '{c.resolve()}'" for c in norm_clips))
 
-    # Ahora el concat es lossless: todos los clips comparten formato.
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
