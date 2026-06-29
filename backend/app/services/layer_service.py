@@ -77,8 +77,12 @@ def _fmt_ts(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _build_srt_from_chars(chars, starts, ends, words_per_cue: int = 4) -> str:
-    """Convierte los tiempos por caracter de ElevenLabs en un .srt agrupado."""
+def _build_srt_from_chars(chars, starts, ends, words_per_cue: int = 7) -> str:
+    """Convierte los tiempos por caracter de ElevenLabs en un .srt agrupado.
+
+    words_per_cue=7 da lineas de texto tipo karaoke (legibles), en vez de
+    una o dos palabras gigantes por pantalla.
+    """
     words = []
     cur_word = ""
     cur_start = None
