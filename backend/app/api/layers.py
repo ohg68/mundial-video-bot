@@ -28,7 +28,7 @@ async def generate_layer(project_id: str, layer: str, background_tasks: Backgrou
         return {"status": "generating", "layer": "video"}
 
     elif layer == "subtitles":
-        background_tasks.add_task(layer_service.generate_subtitles, project_id)
+        background_tasks.add_task(layer_service.generate_subtitles, project_id, config)
         return {"status": "generating", "layer": "subtitles"}
 
     else:
