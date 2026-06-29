@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
-from app.models.project import ProjectConfig, LayerUpdate
-from app.services import project_service, layer_service
+from app.models.project import ProjectConfig, LayerUpdate, LayerStatus
+from app.services import project_service, layer_service, render_service
 import tempfile, shutil
 from pathlib import Path
 
@@ -93,3 +93,99 @@ async def update_script(project_id: str, body: dict):
         json.dumps(project, indent=2, ensure_ascii=False)
     )
     return {"updated": "script"}
+
+
+# --- Estado en memoria del pipeline -----------------------------------------
+_pipeline_state: dict[str, dict] = {}
+
+
+def _set_pipeline(project_id: str, step: str, status: str, error: str | None = None):
+        _pipeline_state[project_id] = {
+                    "step": step,
+                    "status": status,
+                    "error": error,
+        }
+        try:
+                    meta = project_service.get_project(project_id)
+                    if meta is not None:
+                                    meta["pipeline"] = _pipeline_state[project_id]
+                                    from pathlib import Path
+                                    import json
+                                    pdir = Path("projects") / project_id
+                                    (pdir / "project.json").write_text(
+                                        json.dumps(meta, indent=2, ensure_ascii=False)
+                                    )
+        except Exception:
+                    pass
+
+
+async def _run_pipeline(project_id: str):
+        """Ejecuta el pipeline completo en orden garantizado."""
+        meta = project_service.get_project(project_id)
+        if not meta:
+                    _set_pipeline(project_id, "audio", "error", "Proyecto no encontrado")
+                    return
+
+        config = ProjectConfig(**meta["config"])
+
+    try:
+                # 1. Audio + subtítulos (la misma llamada a edge-tts los sincroniza).
+                _set_pipeline(project_id, "audio", "running")
+                await layer_service.generate_audio(project_id, config)
+
+        # 2. Música de fondo (solo si el proyecto la define).
+                music_cfg = meta["config"].get("music") or {}
+                wants_music = bool(music_cfg) and music_cfg.get("enabled", True) is not False
+                if wants_music and hasattr(layer_service, "generate_music"):
+                                _set_pipeline(project_id, "music", "running")
+                                try:
+                                                    await layer_service.generate_music(project_id, config)
+    except Exception as e:
+                        _set_pipeline(project_id, "music", "error", str(e))
+
+        # 3. Capa de vídeo (descarga/normaliza clips y concatena).
+                _set_pipeline(project_id, "video", "running")
+        await layer_service.assemble_video_layer(project_id, config)
+
+        # 4. Render final (compone todo + loudnorm).
+        _set_pipeline(project_id, "render", "running")
+        await render_service.render_final(project_id)
+
+        _set_pipeline(project_id, "done", "ok")
+
+except Exception as e:
+        last = _pipeline_state.get(project_id, {}).get("step", "audio")
+        _set_pipeline(project_id, last, "error", str(e))
+
+
+# --- ENDPOINTS ---------------------------------------------------------------
+
+@router.post("/{project_id}/generate-all")
+async def generate_all(project_id: str, background_tasks: BackgroundTasks):
+        """Genera todas las capas en orden garantizado y renderiza el vídeo final."""
+        if not project_service.get_project(project_id):
+                    raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+        current = _pipeline_state.get(project_id)
+        if current and current["status"] == "running":
+                    return {
+                                    "status": "already_running",
+                                    "step": current["step"],
+                                    "message": "El pipeline ya está en ejecución para este proyecto.",
+                    }
+
+        _set_pipeline(project_id, "audio", "running")
+        background_tasks.add_task(_run_pipeline, project_id)
+        return {"status": "pipeline_started", "project_id": project_id}
+
+
+@router.get("/{project_id}/generate-all/status")
+async def generate_all_status(project_id: str):
+        """Consulta el estado del pipeline (para que el frontend haga polling)."""
+        state = _pipeline_state.get(project_id)
+        if state is None:
+                    meta = project_service.get_project(project_id)
+                    state = (meta or {}).get("pipeline")
+                if state is None:
+                            return {"status": "not_started"}
+                        return state
