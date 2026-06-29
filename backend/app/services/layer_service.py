@@ -223,6 +223,72 @@ async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> P
     return None
 
 
+async def generate_scene_queries(script: str, n_scenes: int = 6) -> list:
+    """Usa DeepSeek para convertir el guion en términos de búsqueda visuales.
+
+    Divide el guion en escenas y, por cada una, devuelve 2-3 palabras en inglés
+    que describen qué clip mostrar (Pexels busca mejor en inglés). Así cada
+    parte del vídeo muestra algo relacionado con lo que se está narrando.
+
+    Devuelve una lista de strings, p.ej.: ["soccer player passing ball",
+    "crowded football stadium", "fast winger sprinting"].
+    """
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+    prompt = f"""Eres un editor de video. Te doy el guion de un video corto sobre futbol.
+Divide el contenido en exactamente {n_scenes} escenas visuales y, para CADA escena,
+dame 2 o 3 palabras EN INGLES que sirvan para buscar un clip de stock que ilustre
+esa parte. Usa terminos visuales y genericos de futbol (no nombres propios, porque
+no hay clips de jugadores concretos en bancos de stock).
+
+Ejemplos de buenas busquedas: "soccer player passing", "football stadium crowd",
+"goalkeeper saving goal", "soccer ball close up", "fast winger running",
+"football tactics board", "soccer fans celebrating".
+
+Guion:
+{script}
+
+Responde SOLO con un JSON array de {n_scenes} strings, sin explicacion.
+Ejemplo de formato: ["soccer player passing", "stadium crowd cheering", "..."]"""
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {deepseek_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "max_tokens": 400,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=30,
+            )
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        # Limpiar posibles ``` o ```json alrededor del JSON.
+        content = content.replace("```json", "").replace("```", "").strip()
+        import json as _json
+        queries = _json.loads(content)
+        # Validar que sea una lista de strings no vacíos.
+        queries = [q.strip() for q in queries if isinstance(q, str) and q.strip()]
+        if queries:
+            return queries
+    except Exception:
+        pass
+
+    # Fallback: si DeepSeek falla, usar términos genéricos de fútbol variados.
+    return [
+        "soccer match action",
+        "football stadium crowd",
+        "soccer player close up",
+        "soccer ball field",
+        "football fans celebrating",
+        "soccer training",
+    ]
+
+
 async def fetch_pexels_clips(query: str, count: int = 8) -> list:
     pexels_key = os.getenv("PEXELS_API_KEY")
     async with httpx.AsyncClient() as client:
@@ -242,6 +308,35 @@ async def fetch_pexels_clips(query: str, count: int = 8) -> list:
     return urls
 
 
+async def fetch_one_clip(query: str) -> str:
+    """Busca en Pexels y devuelve la URL de UN clip para la query dada.
+
+    Si no hay resultado vertical HD, intenta sin filtro de orientación.
+    Devuelve None si no encuentra nada.
+    """
+    pexels_key = os.getenv("PEXELS_API_KEY")
+    async with httpx.AsyncClient() as client:
+        for orientation in ("portrait", None):
+            params = {"query": query, "per_page": 5}
+            if orientation:
+                params["orientation"] = orientation
+            try:
+                resp = await client.get(
+                    "https://api.pexels.com/videos/search",
+                    headers={"Authorization": pexels_key},
+                    params=params,
+                    timeout=15,
+                )
+                data = resp.json()
+            except Exception:
+                continue
+            for v in data.get("videos", []):
+                for f in v.get("video_files", []):
+                    if f.get("quality") == "hd":
+                        return f["link"]
+    return None
+
+
 async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     project_service.update_layer_status(project_id, "video", LayerStatus.pending)
     output_path = project_service.get_layer_path(project_id, "video")
@@ -255,16 +350,31 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             clips = list(clips_dir.glob("*.mp4"))[:8]
 
     if config.video.source in (VideoSource.pexels, VideoSource.mixed) and len(clips) < 8:
-        pexels_query = " ".join(config.topic.split()[:4])
-        pexels_urls = await fetch_pexels_clips(pexels_query, 8 - len(clips))
+        # Selección por escena: DeepSeek convierte el guion en términos visuales
+        # y bajamos un clip distinto por cada escena, así el vídeo pega con lo
+        # que se está narrando (en vez de buscar las primeras 4 palabras del tema).
+        script = config.script or ""
+        scene_queries = await generate_scene_queries(script, n_scenes=8 - len(clips))
+
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         dl_dir.mkdir(parents=True, exist_ok=True)
+        used_urls = set()
         async with httpx.AsyncClient() as client:
-            for i, url in enumerate(pexels_urls):
-                dest = dl_dir / f"pexels_{i}.mp4"
-                r = await client.get(url, timeout=30, follow_redirects=True)
-                dest.write_bytes(r.content)
-                clips.append(dest)
+            for i, query in enumerate(scene_queries):
+                url = await fetch_one_clip(query)
+                # Si ese término no dio clip, o ya se usó, probar un genérico.
+                if not url or url in used_urls:
+                    url = await fetch_one_clip("soccer match action")
+                if not url or url in used_urls:
+                    continue
+                used_urls.add(url)
+                dest = dl_dir / f"scene_{i}.mp4"
+                try:
+                    r = await client.get(url, timeout=30, follow_redirects=True)
+                    dest.write_bytes(r.content)
+                    clips.append(dest)
+                except Exception:
+                    continue
 
     if not clips:
         project_service.update_layer_status(project_id, "video", LayerStatus.error, {
