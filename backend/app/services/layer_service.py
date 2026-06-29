@@ -104,6 +104,65 @@ def _fmt_ts(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _build_srt_from_words(words, words_per_cue: int = 5) -> str:
+    """Convierte palabras-con-tiempo (de Whisper) en un .srt agrupado.
+
+    words: lista de tuplas (texto, inicio_seg, fin_seg).
+    """
+    lines = []
+    idx = 1
+    i = 0
+    n = len(words)
+    while i < n:
+        group = words[i:i + words_per_cue]
+        if not group:
+            break
+        start = group[0][1]
+        end = group[-1][2]
+        text = " ".join(w[0] for w in group)
+        lines.append(f"{idx}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{text}\n")
+        i += words_per_cue
+        idx += 1
+    return "\n".join(lines)
+
+
+# Modelo Whisper cargado una sola vez y reutilizado (evita recargar en cada video).
+_whisper_model = None
+
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        size = os.getenv("WHISPER_MODEL", "base")
+        _whisper_model = WhisperModel(size, device="cpu", compute_type="int8")
+    return _whisper_model
+
+
+def _subtitles_with_whisper(audio_path: Path) -> str:
+    """Escucha el audio con Whisper y devuelve un .srt con tiempos reales.
+
+    Devuelve cadena vacia si algo falla (el llamador hara fallback al reparto
+    calculado).
+    """
+    try:
+        model = _get_whisper()
+        segments, info = model.transcribe(
+            str(audio_path), language="es", word_timestamps=True
+        )
+        words = []
+        for seg in segments:
+            for w in (seg.words or []):
+                txt = w.word.strip()
+                if txt:
+                    words.append((txt, float(w.start), float(w.end)))
+        if not words:
+            return ""
+        return _build_srt_from_words(words)
+    except Exception:
+        return ""
+
+
 def _voice_range(path: Path, total: float) -> tuple:
     """Detecta el rango (inicio, fin) donde realmente hay voz, quitando silencios.
 
@@ -257,11 +316,14 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
     await conv.communicate()
     tmp_mp3.unlink(missing_ok=True)
 
-    # Subtitulos repartidos dentro del rango real de voz del audio generado.
+    # Subtitulos: primero intentamos Whisper (tiempos reales por palabra,
+    # escuchando el audio). Si falla, caemos al reparto calculado.
     dur = _audio_duration(output_path)
-    if dur > 0:
+    srt = _subtitles_with_whisper(output_path)
+    if not srt and dur > 0:
         v_start, v_end = _voice_range(output_path, dur)
         srt = _build_srt_by_duration(script, dur, voice_start=v_start, voice_end=v_end)
+    if srt:
         sub_path = project_service.get_layer_path(project_id, "subtitles")
         sub_path.parent.mkdir(parents=True, exist_ok=True)
         if sub_path.suffix.lower() != ".srt":
