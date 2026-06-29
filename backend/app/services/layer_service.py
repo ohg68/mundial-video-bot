@@ -532,27 +532,33 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     output_path = project_service.get_layer_path(project_id, "video")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Carpeta donde se suben los clips propios del proyecto (endpoint upload).
+    user_clips_dir = Path("projects") / project_id / "video" / "user_clips"
+    user_clips = []
+    if user_clips_dir.exists():
+        for ext in ("*.mp4", "*.mov", "*.MP4", "*.MOV", "*.webm", "*.mkv"):
+            user_clips.extend(sorted(user_clips_dir.glob(ext)))
+
     clips = []
 
-    if config.video.source in (VideoSource.local, VideoSource.mixed):
+    if user_clips:
+        # MODO CLIPS PROPIOS: usar solo los clips subidos por el usuario.
+        clips = user_clips
+    elif config.video.source in (VideoSource.local, VideoSource.mixed):
         clips_dir = Path(config.video.local_folder or LOCAL_CLIPS_DIR)
         if clips_dir.exists():
             clips = list(clips_dir.glob("*.mp4"))[:8]
 
-    if config.video.source in (VideoSource.pexels, VideoSource.mixed) and len(clips) < 8:
-        # Selección por escena: DeepSeek convierte el guion en términos visuales
-        # y bajamos un clip distinto por cada escena, así el vídeo pega con lo
-        # que se está narrando (en vez de buscar las primeras 4 palabras del tema).
+    # Si NO hay clips propios ni locales, caer a Pexels (comportamiento anterior).
+    if not clips and config.video.source in (VideoSource.pexels, VideoSource.mixed):
         script = config.script or ""
-        scene_queries = await generate_scene_queries(script, n_scenes=8 - len(clips))
-
+        scene_queries = await generate_scene_queries(script, n_scenes=8)
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         dl_dir.mkdir(parents=True, exist_ok=True)
         used_urls = set()
         async with httpx.AsyncClient() as client:
             for i, query in enumerate(scene_queries):
                 url = await fetch_one_clip(query)
-                # Si ese término no dio clip, o ya se usó, probar un genérico.
                 if not url or url in used_urls:
                     url = await fetch_one_clip("soccer match action")
                 if not url or url in used_urls:
@@ -568,30 +574,68 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
 
     if not clips:
         project_service.update_layer_status(project_id, "video", LayerStatus.error, {
-            "error": "No clips found"
+            "error": "No hay clips. Sube tus propios clips o configura Pexels."
         })
         return None
 
+    # Duracion del audio para repartir los clips a lo largo de toda la narracion.
+    audio_path = project_service.get_layer_path(project_id, "audio")
+    audio_dur = _audio_duration(audio_path) if audio_path.exists() else 0.0
+
     norm_dir = Path("projects") / project_id / "video" / "normalized"
     norm_dir.mkdir(parents=True, exist_ok=True)
+    # Limpiar normalizados de corridas anteriores.
+    for old in norm_dir.glob("seg_*.mp4"):
+        old.unlink(missing_ok=True)
+
     norm_clips = []
-    for i, c in enumerate(clips):
-        norm = norm_dir / f"norm_{i:02d}.mp4"
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-i", str(c),
-            "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,"
-                   "crop=1080:1920,setsar=1",
-            "-r", "30",
-            "-c:v", "libx264", "-crf", "23", "-preset", "fast",
-            "-pix_fmt", "yuv420p",
-            "-an",
-            str(norm),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        if norm.exists() and norm.stat().st_size > 0:
-            norm_clips.append(norm)
+
+    if audio_dur > 0:
+        # CORTE POR ESCENA: dividir el audio en segmentos y tomar de cada clip
+        # (rotando en orden) el trozo que cubre ese segmento.
+        target_seg = 4.0
+        n_segments = max(len(clips), int(round(audio_dur / target_seg)))
+        seg_dur = audio_dur / n_segments
+        for i in range(n_segments):
+            src = clips[i % len(clips)]
+            seg = norm_dir / f"seg_{i:03d}.mp4"
+            # Tomar desde el inicio del clip; si el clip es mas corto que seg_dur,
+            # ffmpeg usara lo que haya (se vera completo y se pasa al siguiente).
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(src),
+                "-t", f"{seg_dur:.3f}",
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,"
+                       "crop=1080:1920,setsar=1",
+                "-r", "30",
+                "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+                "-pix_fmt", "yuv420p",
+                "-an",
+                str(seg),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            if seg.exists() and seg.stat().st_size > 0:
+                norm_clips.append(seg)
+    else:
+        # Sin audio: normalizar cada clip completo (comportamiento simple).
+        for i, c in enumerate(clips):
+            seg = norm_dir / f"seg_{i:03d}.mp4"
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", str(c),
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,"
+                       "crop=1080:1920,setsar=1",
+                "-r", "30",
+                "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+                "-pix_fmt", "yuv420p",
+                "-an",
+                str(seg),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            if seg.exists() and seg.stat().st_size > 0:
+                norm_clips.append(seg)
 
     if not norm_clips:
         project_service.update_layer_status(project_id, "video", LayerStatus.error, {
@@ -616,7 +660,7 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
 
     project_service.update_layer_status(project_id, "video", LayerStatus.ready, {
         "clips": len(norm_clips),
-        "source": config.video.source,
+        "source": "user_clips" if user_clips else config.video.source,
         "file": str(output_path),
     })
     return output_path
