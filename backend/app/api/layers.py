@@ -98,6 +98,66 @@ async def update_script(project_id: str, body: dict):
     return {"updated": "script"}
 
 
+@router.post("/{project_id}/upload-clips")
+async def upload_clips(project_id: str, files: list[UploadFile] = File(...)):
+    """Sube uno o varios clips de vídeo propios al proyecto.
+
+    Estos clips reemplazan a Pexels: al generar el vídeo se usan estos,
+    cortados por escena según la duración del audio.
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    clips_dir = Path("projects") / project_id / "video" / "user_clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    allowed = {".mp4", ".mov", ".webm", ".mkv"}
+    for f in files:
+        ext = Path(f.filename).suffix.lower()
+        if ext not in allowed:
+            continue
+        dest = clips_dir / f.filename
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(f.file, out)
+        saved.append(f.filename)
+
+    if not saved:
+        raise HTTPException(
+            status_code=400,
+            detail="No se subió ningún clip válido (formatos: mp4, mov, webm, mkv)",
+        )
+
+    return {
+        "status": "uploaded",
+        "project_id": project_id,
+        "clips": saved,
+        "total": len(list(clips_dir.glob("*"))),
+    }
+
+
+@router.get("/{project_id}/clips")
+async def list_clips(project_id: str):
+    """Lista los clips propios subidos al proyecto."""
+    clips_dir = Path("projects") / project_id / "video" / "user_clips"
+    if not clips_dir.exists():
+        return {"clips": [], "total": 0}
+    names = [p.name for p in sorted(clips_dir.glob("*")) if p.is_file()]
+    return {"clips": names, "total": len(names)}
+
+
+@router.delete("/{project_id}/clips")
+async def clear_clips(project_id: str):
+    """Borra todos los clips propios del proyecto (para empezar de cero)."""
+    clips_dir = Path("projects") / project_id / "video" / "user_clips"
+    if clips_dir.exists():
+        for p in clips_dir.glob("*"):
+            if p.is_file():
+                p.unlink(missing_ok=True)
+    return {"status": "cleared", "project_id": project_id}
+
+
 # --- Estado en memoria del pipeline -----------------------------------------
 _pipeline_state: dict[str, dict] = {}
 
