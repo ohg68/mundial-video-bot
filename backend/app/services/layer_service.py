@@ -1,7 +1,7 @@
 import os
+import json
 import httpx
 import asyncio
-import base64
 import subprocess
 from pathlib import Path
 from app.models.project import ProjectConfig, VideoSource, LayerStatus
@@ -9,12 +9,39 @@ from app.services import project_service
 
 LOCAL_CLIPS_DIR = Path(os.getenv("LOCAL_CLIPS_DIR", "clips"))
 
-# Voz por defecto de ElevenLabs. Se puede sobreescribir con la variable de
-# entorno ELEVENLABS_VOICE_ID o desde la config del proyecto.
-# "Sarah" multilingue funciona bien en espanol; cambiala por la que prefieras
-# desde tu panel de ElevenLabs (Voice Lab -> copiar Voice ID).
-DEFAULT_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
-ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+# Voz de Google TTS. WaveNet masculina en español (locutor). Gratis hasta
+# 1 millón de caracteres/mes. Cambiable con la variable ELEVEN... perdón,
+# con la variable GOOGLE_TTS_VOICE.
+GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "es-ES-Wavenet-B")
+GOOGLE_TTS_LANG = os.getenv("GOOGLE_TTS_LANG", "es-ES")
+
+# Ruta donde recreamos el archivo de credenciales a partir de la variable
+# de entorno GOOGLE_CREDENTIALS_JSON (Railway no permite subir archivos).
+_GOOGLE_CRED_PATH = Path("/tmp/google_credentials.json")
+
+
+def _ensure_google_credentials():
+    """Recrea el archivo de credenciales de Google desde la variable de entorno.
+
+    En Railway pegamos el contenido del JSON en GOOGLE_CREDENTIALS_JSON. Aquí lo
+    volcamos a un archivo y apuntamos GOOGLE_APPLICATION_CREDENTIALS hacia él,
+    que es lo que la librería de Google busca para autenticarse.
+    """
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS") and Path(
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+    ).exists():
+        return  # ya configurado
+
+    raw = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if not raw:
+        raise RuntimeError(
+            "Falta la variable GOOGLE_CREDENTIALS_JSON con el contenido del archivo "
+            "de credenciales de Google."
+        )
+    # Validar que sea JSON correcto antes de escribirlo.
+    json.loads(raw)
+    _GOOGLE_CRED_PATH.write_text(raw)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_GOOGLE_CRED_PATH)
 
 
 async def generate_script(project_id: str, config: ProjectConfig) -> str:
@@ -77,46 +104,44 @@ def _fmt_ts(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _build_srt_from_chars(chars, starts, ends, words_per_cue: int = 7) -> str:
-    """Convierte los tiempos por caracter de ElevenLabs en un .srt agrupado.
+def _build_srt_by_duration(text: str, total_seconds: float, words_per_cue: int = 7) -> str:
+    """Reparte el texto en subtitulos proporcionalmente a la duracion del audio.
 
-    words_per_cue=7 da lineas de texto tipo karaoke (legibles), en vez de
-    una o dos palabras gigantes por pantalla.
+    Google TTS no devuelve tiempos por palabra de forma sencilla, asi que
+    repartimos el guion segun cuantas palabras lleva cada tramo. Para narracion
+    corrida queda bien sincronizado. words_per_cue=7 da lineas tipo karaoke.
     """
-    words = []
-    cur_word = ""
-    cur_start = None
-    cur_end = None
-    for ch, st, en in zip(chars, starts, ends):
-        if ch in (" ", "\n", "\t"):
-            if cur_word:
-                words.append((cur_word, cur_start, cur_end))
-                cur_word = ""
-                cur_start = None
-        else:
-            if cur_start is None:
-                cur_start = st
-            cur_word += ch
-            cur_end = en
-    if cur_word:
-        words.append((cur_word, cur_start, cur_end))
-
+    words = text.split()
+    if not words or total_seconds <= 0:
+        return ""
+    n = len(words)
     lines = []
     idx = 1
-    for i in range(0, len(words), words_per_cue):
+    i = 0
+    while i < n:
         group = words[i:i + words_per_cue]
-        if not group:
-            continue
-        start = group[0][1] if group[0][1] is not None else 0.0
-        end = group[-1][2] if group[-1][2] is not None else start + 1.0
-        text = " ".join(w[0] for w in group)
-        lines.append(f"{idx}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{text}\n")
+        start = (i / n) * total_seconds
+        end = (min(i + words_per_cue, n) / n) * total_seconds
+        lines.append(f"{idx}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{' '.join(group)}\n")
+        i += words_per_cue
         idx += 1
     return "\n".join(lines)
 
 
+def _audio_duration(path: Path) -> float:
+    """Duracion del audio en segundos via ffprobe."""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
+        )
+        return float(out.decode().strip())
+    except Exception:
+        return 0.0
+
+
 async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
-    """Genera la narracion con ElevenLabs y los subtitulos sincronizados."""
+    """Genera la narracion con Google TTS y subtitulos repartidos por duracion."""
     project_service.update_layer_status(project_id, "audio", LayerStatus.pending)
     script = config.script or await generate_script(project_id, config)
     output_path = project_service.get_layer_path(project_id, "audio")
@@ -131,45 +156,42 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
         })
         return output_path
 
-    api_key = os.getenv("ELEVENLABS_API_KEY")
-    if not api_key:
-        raise RuntimeError("Falta la variable de entorno ELEVENLABS_API_KEY")
+    _ensure_google_credentials()
+    voice_name = getattr(config.audio, "voice_name", None) or GOOGLE_TTS_VOICE
 
-    voice_id = getattr(config.audio, "voice_id", None) or DEFAULT_VOICE_ID
+    # Velocidad: config.audio.speed (1.0 normal). Google usa speaking_rate.
+    speaking_rate = float(getattr(config.audio, "speed", 1.0) or 1.0)
+    speaking_rate = max(0.25, min(4.0, speaking_rate))
 
     def _synthesize():
-        from elevenlabs.client import ElevenLabs
-        client = ElevenLabs(api_key=api_key)
-        return client.text_to_speech.convert_with_timestamps(
-            voice_id=voice_id,
-            text=script,
-            model_id=ELEVENLABS_MODEL,
-            output_format="mp3_44100_128",
+        from google.cloud import texttospeech
+        client = texttospeech.TextToSpeechClient()
+        synthesis_input = texttospeech.SynthesisInput(text=script)
+        voice = texttospeech.VoiceSelectionParams(
+            language_code=GOOGLE_TTS_LANG,
+            name=voice_name,
         )
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3,
+            speaking_rate=speaking_rate,
+        )
+        resp = client.synthesize_speech(
+            input=synthesis_input, voice=voice, audio_config=audio_config
+        )
+        return resp.audio_content
 
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(None, _synthesize)
+        audio_bytes = await loop.run_in_executor(None, _synthesize)
     except Exception as e:
-        raise RuntimeError(f"ElevenLabs error: {e}")
+        raise RuntimeError(f"Google TTS error: {e}")
 
-    def _get(obj, *names, default=None):
-        for n in names:
-            if isinstance(obj, dict) and n in obj:
-                return obj[n]
-            if hasattr(obj, n):
-                return getattr(obj, n)
-        return default
+    if not audio_bytes:
+        raise RuntimeError("Google TTS no devolvio audio")
 
-    audio_b64 = _get(result, "audio_base_64", "audio_base64")
-    alignment = _get(result, "alignment")
-
-    if not audio_b64:
-        raise RuntimeError("ElevenLabs no devolvio audio")
-
+    # Guardar el mp3 crudo y re-encodear a mp3 estandar con ffmpeg.
     tmp_mp3 = output_path.with_suffix(".raw.mp3")
-    tmp_mp3.write_bytes(base64.b64decode(audio_b64))
-
+    tmp_mp3.write_bytes(audio_bytes)
     conv = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-i", str(tmp_mp3),
         "-acodec", "libmp3lame", "-q:a", "2",
@@ -180,30 +202,25 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
     await conv.communicate()
     tmp_mp3.unlink(missing_ok=True)
 
-    if alignment is not None:
-        chars = _get(alignment, "characters", default=[])
-        starts = _get(alignment, "character_start_times_seconds",
-                      "character_start_times", default=[])
-        ends = _get(alignment, "character_end_times_seconds",
-                    "character_end_times", default=[])
-        if chars and starts and ends:
-            srt = _build_srt_from_chars(list(chars), list(starts), list(ends))
-            sub_path = project_service.get_layer_path(project_id, "subtitles")
-            sub_path.parent.mkdir(parents=True, exist_ok=True)
-            if sub_path.suffix.lower() != ".srt":
-                sub_path = sub_path.with_suffix(".srt")
-            sub_path.write_text(srt, encoding="utf-8")
-            project_service.update_layer_status(project_id, "subtitles", LayerStatus.ready, {
-                "file": str(sub_path),
-                "synced_with": "audio",
-            })
+    # Subtitulos repartidos segun la duracion real del audio generado.
+    dur = _audio_duration(output_path)
+    if dur > 0:
+        srt = _build_srt_by_duration(script, dur)
+        sub_path = project_service.get_layer_path(project_id, "subtitles")
+        sub_path.parent.mkdir(parents=True, exist_ok=True)
+        if sub_path.suffix.lower() != ".srt":
+            sub_path = sub_path.with_suffix(".srt")
+        sub_path.write_text(srt, encoding="utf-8")
+        project_service.update_layer_status(project_id, "subtitles", LayerStatus.ready, {
+            "file": str(sub_path),
+            "synced_with": "audio",
+        })
 
     project_service.update_layer_status(project_id, "audio", LayerStatus.ready, {
-        "voice": voice_id,
+        "voice": voice_name,
         "file": str(output_path),
     })
     return output_path
-
 
 async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> Path:
     """Devuelve los subtitulos generados junto al audio."""
