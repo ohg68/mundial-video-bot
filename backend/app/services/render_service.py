@@ -88,9 +88,9 @@ async def render_final(project_id: str) -> Path:
     # así que valores como 48 salen gigantes (una palabra llena la pantalla).
     # 22 da líneas de texto legibles tipo karaoke. Si la config trae un valor
     # muy grande (heredado de pruebas antiguas), lo limitamos.
-    sub_size = sub_cfg.get("font_size", 22)
-    if sub_size > 28:
-        sub_size = 22
+    sub_size = sub_cfg.get("font_size", 16)
+    if sub_size > 20:
+        sub_size = 16
     sub_margin = sub_cfg.get("margin_v", 90)           # safe-zone vertical (fuera de UI TikTok/Reels)
 
     # ---- Inputs -----------------------------------------------------------
