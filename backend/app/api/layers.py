@@ -133,16 +133,6 @@ async def _run_pipeline(project_id: str):
                 _set_pipeline(project_id, "audio", "running")
                 await layer_service.generate_audio(project_id, config)
 
-        # 2. Música de fondo (solo si el proyecto la define).
-                music_cfg = meta["config"].get("music") or {}
-                wants_music = bool(music_cfg) and music_cfg.get("enabled", True) is not False
-                if wants_music and hasattr(layer_service, "generate_music"):
-                                _set_pipeline(project_id, "music", "running")
-                                try:
-                                                    await layer_service.generate_music(project_id, config)
-    except Exception as e:
-                        _set_pipeline(project_id, "music", "error", str(e))
-
         # 3. Capa de vídeo (descarga/normaliza clips y concatena).
                 _set_pipeline(project_id, "video", "running")
         await layer_service.assemble_video_layer(project_id, config)
