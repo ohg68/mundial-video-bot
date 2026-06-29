@@ -33,62 +33,63 @@ export default function NewProjectModal({ onCreated, onClose }) {
     onCreated(project)
   }
 
+  const canSubmit = form.title && form.topic
+
   return (
-    <div style={{
-      position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)",
-      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
-    }}>
-      <div style={{
-        background: "var(--color-background-primary, #fff)",
-        borderRadius: 14, padding: 28, width: 480, maxWidth: "90vw",
-        border: "0.5px solid var(--color-border-tertiary, #e0e0e0)",
-      }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 20 }}>
-          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 500 }}>Nuevo proyecto</h2>
-          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#999" }}>✕</button>
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl p-5 sm:p-7 w-full sm:w-[480px] sm:max-w-[90vw] border border-gray-200 max-h-[90dvh] overflow-y-auto">
+        <div className="flex justify-between items-center mb-5">
+          <h2 className="m-0 text-base sm:text-lg font-medium">Nuevo proyecto</h2>
+          <button onClick={onClose} className="bg-transparent border-none cursor-pointer text-lg text-gray-400 hover:text-gray-600 p-1">✕</button>
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div className="flex flex-col gap-3.5">
           <div>
-            <label style={labelStyle}>Título del vídeo</label>
-            <input value={form.title} onChange={e => set("title", e.target.value)}
-              placeholder="Ej: Cómo usar RFID en hoteles, Tutorial de Odoo, Resumen del partido..."
-              style={inputStyle} />
+            <label className="block text-xs text-gray-400 mb-1">Título del vídeo</label>
+            <input
+              value={form.title}
+              onChange={e => set("title", e.target.value)}
+              placeholder="Ej: Cómo usar RFID en hoteles, Tutorial de Odoo..."
+              className="input-field"
+            />
           </div>
 
           <div>
-            <label style={labelStyle}>Tema / Prompt para el guión</label>
-            <textarea value={form.topic} onChange={e => set("topic", e.target.value)}
-              placeholder="Describe de qué trata el vídeo. Cuanto más detalle, mejor será el guión generado automáticamente."
-              style={{ ...inputStyle, height: 90, resize: "vertical" }} />
+            <label className="block text-xs text-gray-400 mb-1">Tema / Prompt para el guión</label>
+            <textarea
+              value={form.topic}
+              onChange={e => set("topic", e.target.value)}
+              placeholder="Describe de qué trata el vídeo. Cuanto más detalle, mejor será el guión generado."
+              className="input-field h-[90px] resize-y"
+            />
           </div>
 
-          <div style={{ display: "flex", gap: 12 }}>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Categoría</label>
-              <select value={form.category} onChange={e => set("category", e.target.value)} style={inputStyle}>
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="block text-xs text-gray-400 mb-1">Categoría</label>
+              <select value={form.category} onChange={e => set("category", e.target.value)} className="input-field">
                 <option value="">— Seleccionar —</option>
                 {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Fecha (opcional)</label>
-              <input type="date" value={form.date} onChange={e => set("date", e.target.value)} style={inputStyle} />
+            <div className="flex-1">
+              <label className="block text-xs text-gray-400 mb-1">Fecha (opcional)</label>
+              <input type="date" value={form.date} onChange={e => set("date", e.target.value)} className="input-field" />
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 12 }}>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Formato</label>
-              <select value={form.aspect} onChange={e => set("aspect", e.target.value)} style={inputStyle}>
-                <option value="9:16">9:16 Vertical (Shorts / TikTok / Reels)</option>
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="block text-xs text-gray-400 mb-1">Formato</label>
+              <select value={form.aspect} onChange={e => set("aspect", e.target.value)} className="input-field">
+                <option value="9:16">9:16 Vertical (Shorts / TikTok)</option>
                 <option value="16:9">16:9 Horizontal (YouTube)</option>
                 <option value="1:1">1:1 Cuadrado (Instagram)</option>
               </select>
             </div>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Idioma del guión</label>
-              <select value={form.language} onChange={e => set("language", e.target.value)} style={inputStyle}>
+            <div className="flex-1">
+              <label className="block text-xs text-gray-400 mb-1">Idioma del guión</label>
+              <select value={form.language} onChange={e => set("language", e.target.value)} className="input-field">
                 <option value="es">Español</option>
                 <option value="pt">Portugués</option>
                 <option value="en">English</option>
@@ -99,25 +100,18 @@ export default function NewProjectModal({ onCreated, onClose }) {
             </div>
           </div>
 
-          <button onClick={handleSubmit} disabled={loading || !form.title || !form.topic} style={{
-            marginTop: 6, padding: "9px 0", borderRadius: 8,
-            background: form.title && form.topic ? "#185FA5" : "#ccc",
-            color: form.title && form.topic ? "#E6F1FB" : "#888",
-            border: "none", cursor: form.title && form.topic ? "pointer" : "not-allowed",
-            fontSize: 14, fontWeight: 500,
-          }}>
+          <button
+            onClick={handleSubmit}
+            disabled={loading || !canSubmit}
+            className={`mt-1.5 py-2.5 rounded-lg border-none text-sm font-medium transition-colors
+              ${canSubmit
+                ? "bg-[#185FA5] text-blue-100 cursor-pointer hover:bg-[#0C447C]"
+                : "bg-gray-200 text-gray-500 cursor-not-allowed"}`}
+          >
             {loading ? "Creando..." : "Crear proyecto"}
           </button>
         </div>
       </div>
     </div>
   )
-}
-
-const labelStyle = { display: "block", fontSize: 12, color: "#888", marginBottom: 4 }
-const inputStyle = {
-  width: "100%", padding: "7px 10px", borderRadius: 7,
-  border: "0.5px solid #ccc", fontSize: 13, boxSizing: "border-box",
-  background: "var(--color-background-primary, #fff)",
-  color: "var(--color-text-primary, #1a1a1a)",
 }

@@ -2,3 +2,5 @@ frontend/node_modules/
 backend/.venv/
 backend/projects/
 frontend/package-lock.json
+frontend/dist/
+.claude/
