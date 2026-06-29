@@ -104,6 +104,54 @@ def _fmt_ts(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _normalize_word(w: str) -> str:
+    import re
+    return re.sub(r"[^\w]", "", w.lower())
+
+
+def _align_script_to_times(script_words, whisper_words):
+    """Asigna a cada palabra del GUION (ortografía correcta) el tiempo de la
+    palabra de Whisper que le corresponde. Así los subtítulos tienen la
+    ortografía del guion y los tiempos reales del audio.
+
+    script_words: lista de palabras correctas (del guion).
+    whisper_words: lista de (texto, start, end) de Whisper.
+    Devuelve: lista de (palabra_correcta, start, end).
+    """
+    import difflib
+    w_norm = [_normalize_word(w[0]) for w in whisper_words]
+    s_norm = [_normalize_word(w) for w in script_words]
+    sm = difflib.SequenceMatcher(None, s_norm, w_norm)
+    result = [None] * len(script_words)
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                wt = whisper_words[j1 + k]
+                result[i1 + k] = (script_words[i1 + k], wt[1], wt[2])
+        else:
+            if j2 > j1:
+                t_start = whisper_words[j1][1]
+                t_end = whisper_words[j2 - 1][2]
+            else:
+                ref = min(j1, len(whisper_words) - 1)
+                t_start = whisper_words[ref][1] if whisper_words else 0.0
+                t_end = t_start + 0.5
+            count = max(1, i2 - i1)
+            step = (t_end - t_start) / count
+            for k in range(i2 - i1):
+                result[i1 + k] = (
+                    script_words[i1 + k],
+                    t_start + k * step,
+                    t_start + (k + 1) * step,
+                )
+    for idx in range(len(result)):
+        if result[idx] is None:
+            prev = result[idx - 1][2] if idx > 0 and result[idx - 1] else 0.0
+            result[idx] = (script_words[idx], prev, prev + 0.3)
+    return result
+
+
 def _build_srt_from_words(words, words_per_cue: int = 5) -> str:
     """Convierte palabras-con-tiempo (de Whisper) en un .srt agrupado.
 
@@ -139,11 +187,12 @@ def _get_whisper():
     return _whisper_model
 
 
-def _subtitles_with_whisper(audio_path: Path) -> str:
+def _subtitles_with_whisper(audio_path: Path, script: str = "") -> str:
     """Escucha el audio con Whisper y devuelve un .srt con tiempos reales.
 
-    Devuelve cadena vacia si algo falla (el llamador hara fallback al reparto
-    calculado).
+    Si se pasa el guion, usa la ortografía del guion con los tiempos de Whisper
+    (corrige los errores de transcripción de Whisper, p.ej. nombres propios).
+    Devuelve cadena vacía si algo falla (el llamador hará fallback).
     """
     try:
         model = _get_whisper()
@@ -158,6 +207,12 @@ def _subtitles_with_whisper(audio_path: Path) -> str:
                     words.append((txt, float(w.start), float(w.end)))
         if not words:
             return ""
+        # Si tenemos el guion, sustituir las palabras de Whisper por las del
+        # guion (ortografía correcta) manteniendo los tiempos.
+        script_words = script.split() if script else []
+        if script_words:
+            aligned = _align_script_to_times(script_words, words)
+            return _build_srt_from_words(aligned)
         return _build_srt_from_words(words)
     except Exception:
         return ""
@@ -319,7 +374,7 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
     # Subtitulos: primero intentamos Whisper (tiempos reales por palabra,
     # escuchando el audio). Si falla, caemos al reparto calculado.
     dur = _audio_duration(output_path)
-    srt = _subtitles_with_whisper(output_path)
+    srt = _subtitles_with_whisper(output_path, script=script)
     if not srt and dur > 0:
         v_start, v_end = _voice_range(output_path, dur)
         srt = _build_srt_by_duration(script, dur, voice_start=v_start, voice_end=v_end)
