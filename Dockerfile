@@ -26,4 +26,4 @@ RUN mkdir -p projects clips music
 
 EXPOSE 10000
 
-CMD ["/usr/local/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD uvicorn main:app --host 0.0.0.0 --port $PORT
