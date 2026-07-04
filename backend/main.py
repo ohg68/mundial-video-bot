@@ -25,7 +25,21 @@ async def lifespan(app: FastAPI):
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if telegram_token:
         from app.telegram_bot import start_polling
-        asyncio.create_task(start_polling(telegram_token))
+        # Guardar la referencia: el loop solo mantiene weakrefs a las tasks, y una
+        # task sin referencia externa puede ser recolectada por el GC a mitad de
+        # ejecución (por eso el bot dejaba de poletear de forma intermitente).
+        app.state.bot_task = asyncio.create_task(start_polling(telegram_token))
+
+        def _bot_done(task):
+            try:
+                exc = task.exception()
+            except asyncio.CancelledError:
+                exc = None
+            if exc:
+                logging.getLogger(__name__).error(
+                    "La task del bot de Telegram terminó con error: %r", exc, exc_info=exc)
+
+        app.state.bot_task.add_done_callback(_bot_done)
         logging.getLogger(__name__).info("Telegram bot iniciado")
     else:
         logging.getLogger(__name__).info("TELEGRAM_BOT_TOKEN no configurado — bot desactivado")

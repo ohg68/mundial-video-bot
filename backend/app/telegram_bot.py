@@ -1380,10 +1380,21 @@ def build_app(token: str) -> Application:
     return application
 
 
+# Referencia a nivel de módulo: mantiene viva la Application/updater de PTB para que
+# el GC no la recolecte una vez que start_polling() retorna (start_polling no bloquea).
+_application = None
+
+
 async def start_polling(token: str):
     """Inicia el bot en background (no bloquea uvicorn)."""
-    app = build_app(token)
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    log.info("✅ Telegram bot polling iniciado")
+    global _application
+    try:
+        _application = build_app(token)
+        await _application.initialize()
+        await _application.start()
+        await _application.updater.start_polling(drop_pending_updates=True)
+        log.info("✅ Telegram bot polling iniciado")
+    except Exception:
+        # Sin esto, un fallo aquí se perdía y la capa quedaba muda (bot sin poletear).
+        log.exception("❌ start_polling falló — el bot no arrancó")
+        raise
