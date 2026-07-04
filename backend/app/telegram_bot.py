@@ -673,14 +673,74 @@ async def _deliver_render(bot, chat_id: int, meta: dict) -> bool:
     return True
 
 
+def _post_render_kb(project_id: str) -> InlineKeyboardMarkup:
+    """Botones tras entregar un render: descargar de nuevo, rehacer o ver capas."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📥 Descargar", callback_data=f"pd_{project_id}"),
+            InlineKeyboardButton("🔄 Rehacer video", callback_data=f"regen_video_{project_id}"),
+        ],
+        [InlineKeyboardButton("🎬 Capas", callback_data=f"pc_{project_id}")],
+    ])
+
+
+async def _render_and_deliver(bot, chat_id: int, meta: dict):
+    """Renderiza el proyecto (final.mp4) y lo entrega, con botones de próximos pasos.
+    Es el 'botón de render' reutilizable: evita tener que escribir /render ID a mano."""
+    project_id = meta["id"]
+    status = await bot.send_message(chat_id, "⚡ Renderizando el video (1080p)...")
+    try:
+        output = await render_service.render_final(project_id, quality="full")
+    except Exception as e:
+        await status.edit_text(f"❌ Error al renderizar:\n`{str(e)[:200]}`", parse_mode="Markdown")
+        return
+    size_mb = output.stat().st_size / 1024 / 1024
+    await status.edit_text(f"✅ Render listo ({size_mb:.1f}MB) — te lo envío 👇")
+    caption = f"🎬 *{meta.get('title', project_id)}*\n_{meta.get('topic','')}_"
+    await _send_video(bot, chat_id, output, caption)
+    await bot.send_message(
+        chat_id,
+        "¿Te gustó cómo quedó? Si no, tocá *Rehacer video*. Si sí, ya lo tenés arriba 👍",
+        reply_markup=_post_render_kb(project_id),
+        parse_mode="Markdown",
+    )
+
+
+async def on_render(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Botón 'Renderizar y ver' (render_<id>). Renderiza y entrega sin escribir el ID."""
+    query = update.callback_query
+    await query.answer()
+    project_id = query.data.split("_", 1)[1]
+    meta = _owns(project_id, query.message.chat_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado o no es tuyo.")
+        return
+    await query.edit_message_text("⚡ Preparando el render...")
+    asyncio.create_task(_render_and_deliver(context.application.bot, query.message.chat_id, meta))
+
+
+async def cmd_render(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/render [ID] — renderiza y entrega. Sin ID, muestra un selector de proyectos."""
+    if not await _guard(update):
+        return
+    args = context.args
+    if not args:
+        await _send_project_picker(update, "⚡ Elige un proyecto para renderizar y ver:", "render")
+        return
+    meta = _owns(args[0], update.effective_chat.id)
+    if not meta:
+        await update.message.reply_text(f"❌ Proyecto `{args[0]}` no encontrado o no es tuyo.", parse_mode="Markdown")
+        return
+    asyncio.create_task(_render_and_deliver(context.application.bot, update.effective_chat.id, meta))
+
+
 async def cmd_descargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
     args = context.args
     if not args:
-        await update.message.reply_text(
-            "Uso: `/descargar ID_proyecto`", parse_mode="Markdown"
-        )
+        # Sin ID: ofrecer la lista de proyectos como botones (nada de códigos a mano)
+        await _send_project_picker(update, "📥 Elige un proyecto para descargar:", "pd")
         return
 
     project_id = args[0]
@@ -725,7 +785,10 @@ def _actions_kb(project_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📝 Guión", callback_data=f"pg_{project_id}"),
             InlineKeyboardButton("🎬 Capas", callback_data=f"pc_{project_id}"),
         ],
-        [InlineKeyboardButton("📥 Descargar video", callback_data=f"pd_{project_id}")],
+        [
+            InlineKeyboardButton("📥 Descargar video", callback_data=f"pd_{project_id}"),
+            InlineKeyboardButton("🔄 Rehacer video", callback_data=f"regen_video_{project_id}"),
+        ],
     ])
 
 
@@ -1171,17 +1234,25 @@ async def on_setvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _regen_layer(bot, chat_id: int, project_id: str, layer: str, config):
-    """Regenerar una capa y notificar."""
+    """Regenerar una capa y ofrecer el siguiente paso natural: renderizar y ver."""
+    labels = {"audio": "Audio", "video": "Video", "subtitles": "Subtítulos"}
     try:
         if layer == "audio":
             await layer_service.generate_audio(project_id, config)
-            await bot.send_message(chat_id, f"✅ Audio regenerado", parse_mode="Markdown")
         elif layer == "video":
             await layer_service.assemble_video_layer(project_id, config)
-            await bot.send_message(chat_id, f"✅ Video regenerado", parse_mode="Markdown")
         elif layer == "subtitles":
             await layer_service.generate_subtitles(project_id)
-            await bot.send_message(chat_id, f"✅ Subtítulos regenerados", parse_mode="Markdown")
+        # Tras regenerar hay que re-renderizar para ver el cambio en el video final.
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Renderizar y ver el resultado", callback_data=f"render_{project_id}")],
+        ])
+        await bot.send_message(
+            chat_id,
+            f"✅ {labels.get(layer, layer)} regenerado.\n\nToca para renderizar y ver cómo quedó 👇",
+            reply_markup=kb,
+            parse_mode="Markdown",
+        )
     except Exception as e:
         await bot.send_message(
             chat_id,
@@ -1330,11 +1401,14 @@ def build_app(token: str) -> Application:
     application.add_handler(CommandHandler("ultimos", cmd_ultimos))
     application.add_handler(CommandHandler("estado", cmd_estado))
     application.add_handler(CommandHandler("descargar", cmd_descargar))
+    application.add_handler(CommandHandler("render", cmd_render))
     application.add_handler(CommandHandler("capas", cmd_capas))
     application.add_handler(CommandHandler("guion", cmd_guion))
 
     # Acciones de proyecto por botón (menú, guión, capas, descargar)
     application.add_handler(CallbackQueryHandler(on_proj_action, pattern="^(pmenu|pg|pc|pd)_"))
+    # Renderizar y ver (botón/comando, sin escribir el ID)
+    application.add_handler(CallbackQueryHandler(on_render, pattern="^render_"))
 
     # Capas management
     application.add_handler(CallbackQueryHandler(on_layer_selected, pattern="^layer_"))
