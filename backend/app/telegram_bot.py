@@ -1016,7 +1016,11 @@ async def on_layer_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Botones de acción
     keyboard = []
     if st != "empty":
-        keyboard.append([InlineKeyboardButton(f"📥 Descargar {layer}", callback_data=f"dl_{layer}_{project_id}")])
+        row = [InlineKeyboardButton(f"📥 Descargar {layer}", callback_data=f"dl_{layer}_{project_id}")]
+        # Vista previa inline (reproducible) para las capas que la soportan
+        if layer in ("video", "audio", "subtitles"):
+            row.insert(0, InlineKeyboardButton("👀 Ver", callback_data=f"preview_{layer}_{project_id}"))
+        keyboard.append(row)
 
     if layer == "audio":
         keyboard.append([InlineKeyboardButton("🎙️ Editar voz/velocidad", callback_data=f"edit_audio_{project_id}")])
@@ -1041,6 +1045,22 @@ async def on_layer_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
+
+
+async def on_layer_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vista previa inline de una capa (preview_<layer>_<id>), sin renderizar."""
+    query = update.callback_query
+    await query.answer("Enviando vista previa...")
+    parts = query.data.split("_")
+    layer = parts[1]
+    project_id = "_".join(parts[2:])
+    meta = _owns(project_id, query.message.chat_id)
+    if not meta:
+        await query.answer("Proyecto no encontrado o no es tuyo", show_alert=True)
+        return
+    ok = await _send_layer_preview(context.application.bot, query.message.chat_id, project_id, layer)
+    if not ok:
+        await query.answer("Esa capa aún no está generada", show_alert=True)
 
 
 async def on_layer_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1233,9 +1253,35 @@ async def on_setvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, "audio", config))
 
 
+async def _send_layer_preview(bot, chat_id: int, project_id: str, layer: str) -> bool:
+    """Envía la capa recién generada para previsualizarla SIN renderizar.
+    El video.mp4 es mudo (solo imágenes); el audio se escucha; subtítulos = texto."""
+    files = {"video": "video.mp4", "audio": "narration.mp3", "subtitles": "subtitles.srt"}
+    path = Path("projects") / project_id / layer / files.get(layer, "")
+    if not path.exists():
+        return False
+    try:
+        if layer == "video":
+            await _send_video(bot, chat_id, path,
+                              "👀 *Vista previa* — solo las imágenes, sin audio ni subtítulos todavía.")
+        elif layer == "audio":
+            with open(path, "rb") as f:
+                await bot.send_audio(chat_id, f, caption="🎧 *Vista previa de la narración*",
+                                     parse_mode="Markdown", read_timeout=120, write_timeout=120)
+        elif layer == "subtitles":
+            txt = path.read_text(encoding="utf-8")[:1500]
+            await bot.send_message(chat_id, f"📝 *Subtítulos generados:*\n```\n{txt}\n```",
+                                   parse_mode="Markdown")
+        return True
+    except Exception as e:
+        log.warning(f"No pude enviar preview de {layer}: {e}")
+        return False
+
+
 async def _regen_layer(bot, chat_id: int, project_id: str, layer: str, config):
-    """Regenerar una capa y ofrecer el siguiente paso natural: renderizar y ver."""
+    """Regenerar una capa, mostrar su vista previa SIN renderizar, y ofrecer los pasos."""
     labels = {"audio": "Audio", "video": "Video", "subtitles": "Subtítulos"}
+    regen_cb = {"video": "regen_video", "audio": "regen_audio", "subtitles": "regen_subs"}
     try:
         if layer == "audio":
             await layer_service.generate_audio(project_id, config)
@@ -1243,13 +1289,17 @@ async def _regen_layer(bot, chat_id: int, project_id: str, layer: str, config):
             await layer_service.assemble_video_layer(project_id, config)
         elif layer == "subtitles":
             await layer_service.generate_subtitles(project_id)
-        # Tras regenerar hay que re-renderizar para ver el cambio en el video final.
+        # Primero mostrar la capa tal cual quedó (sin gastar un render completo).
+        shown = await _send_layer_preview(bot, chat_id, project_id, layer)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎬 Renderizar y ver el resultado", callback_data=f"render_{project_id}")],
+            [InlineKeyboardButton("🎬 Renderizar completo (con audio y subtítulos)", callback_data=f"render_{project_id}")],
+            [InlineKeyboardButton("🔄 Rehacer de nuevo", callback_data=f"{regen_cb.get(layer, 'regen_video')}_{project_id}")],
         ])
+        nota = "mirá la vista previa 👆" if shown else "listo"
         await bot.send_message(
             chat_id,
-            f"✅ {labels.get(layer, layer)} regenerado.\n\nToca para renderizar y ver cómo quedó 👇",
+            f"✅ {labels.get(layer, layer)} regenerado — {nota}\n\n"
+            "¿Te gusta? Si sí, *renderizá el video final*. Si no, rehacelo.",
             reply_markup=kb,
             parse_mode="Markdown",
         )
@@ -1412,6 +1462,7 @@ def build_app(token: str) -> Application:
 
     # Capas management
     application.add_handler(CallbackQueryHandler(on_layer_selected, pattern="^layer_"))
+    application.add_handler(CallbackQueryHandler(on_layer_preview, pattern="^preview_"))
     application.add_handler(CallbackQueryHandler(on_layer_download, pattern="^dl_"))
     application.add_handler(CallbackQueryHandler(on_edit_audio, pattern="^edit_audio_"))
     application.add_handler(CallbackQueryHandler(on_voice_menu, pattern="^voice_menu_"))
