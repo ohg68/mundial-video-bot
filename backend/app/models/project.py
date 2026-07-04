@@ -16,6 +16,7 @@ class TTSProvider(str, Enum):
     edge = "edge"
     openai = "openai"
     elevenlabs = "elevenlabs"
+    google = "google"
 
 class VoiceModel(str, Enum):
     alvaro = "es-ES-AlvaroNeural"
