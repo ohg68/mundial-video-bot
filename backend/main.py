@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from app.api import projects, layers, render, publish, sources, share
+from app.api import projects, layers, render, publish, sources, share, gdrive
 from app.auth import router as auth_router
 from app.database import init_db
 from app.migrate import migrate_json_to_db
@@ -58,6 +58,7 @@ app.include_router(render.router, prefix="/api/render", tags=["render"])
 app.include_router(publish.router, prefix="/api/publish", tags=["publish"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 app.include_router(share.router, prefix="/api/share", tags=["share"])
+app.include_router(gdrive.router, prefix="/api/gdrive", tags=["gdrive"])
 
 app.add_api_websocket_route("/ws/{project_id}", websocket_endpoint)
 

@@ -11,6 +11,7 @@ class VideoSource(str, Enum):
     mixed = "mixed"
     photos = "photos"
     mixed_photos = "mixed_photos"
+    gdrive = "gdrive"
 
 class TTSProvider(str, Enum):
     edge = "edge"
@@ -47,6 +48,9 @@ class VideoLayerConfig(BaseModel):
     source: VideoSource = VideoSource.mixed
     clip_duration: int = 4
     local_folder: Optional[str] = None
+    # Google Drive: ID de la carpeta (compartida con la cuenta de servicio) de la
+    # que se toman los clips. Si es None, se usa GDRIVE_VIDEO_FOLDER_ID del entorno.
+    gdrive_folder_id: Optional[str] = None
     # A/B split: segmenta el guion y baja 2 visuales (A/B) por escena para que
     # la imagen siga lo que narra el locutor. Off por defecto (sin cambio de comportamiento).
     ab_split: bool = False

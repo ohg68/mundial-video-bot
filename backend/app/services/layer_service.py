@@ -705,6 +705,27 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
                 if i < len(pexels_clips):
                     clips.append(pexels_clips[i])
 
+    # ── Google Drive (carpeta curada compartida con la cuenta de servicio) ─────
+    if config.video.source == VideoSource.gdrive:
+        from app.services import gdrive_service
+        folder_id = config.video.gdrive_folder_id or os.getenv("GDRIVE_VIDEO_FOLDER_ID")
+        if not folder_id:
+            project_service.update_layer_status(project_id, "video", LayerStatus.error, {
+                "error": "Falta la carpeta de Google Drive (gdrive_folder_id o GDRIVE_VIDEO_FOLDER_ID).",
+            })
+            return None
+        n_clips = 6
+        clip_dur = float(config.video.clip_duration or 4)
+        audio_path = project_service.get_layer_path(project_id, "audio")
+        if audio_path.exists():
+            audio_dur = await _get_audio_duration(audio_path)
+            if audio_dur > 0:
+                clip_dur = round(audio_dur / n_clips, 2)
+        gdir = Path("projects") / project_id / "video" / "gdrive"
+        clips = await gdrive_service.fetch_gdrive_clips(
+            folder_id, gdir, count=n_clips, duration=clip_dur, aspect=aspect,
+        )
+
     # ── Local clips ────────────────────────────────────────────────
     if config.video.source in (VideoSource.local, VideoSource.mixed):
         clips_dir = Path(config.video.local_folder or LOCAL_CLIPS_DIR)
@@ -719,9 +740,12 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         clips.extend(await _download_clips(pexels_urls, dl_dir, "pexels"))
 
     if not clips:
-        project_service.update_layer_status(project_id, "video", LayerStatus.error, {
-            "error": "Sin clips disponibles. Configura PEXELS_API_KEY o PIXABAY_API_KEY en Railway.",
-        })
+        if config.video.source == VideoSource.gdrive:
+            err = ("Sin clips de Google Drive. Verifica que la carpeta tenga videos y esté "
+                   "compartida con la cuenta de servicio.")
+        else:
+            err = "Sin clips disponibles. Configura PEXELS_API_KEY o PIXABAY_API_KEY en Railway."
+        project_service.update_layer_status(project_id, "video", LayerStatus.error, {"error": err})
         return None
 
     list_file = Path("projects") / project_id / "video" / "clips.txt"
