@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
 from app.models.project import ProjectConfig, LayerUpdate, LayerStatus
-from app.services import project_service, layer_service, render_service
+from app.services import project_service, layer_service, render_service, sfx_service
 import tempfile, shutil
 from pathlib import Path
 
@@ -155,6 +155,61 @@ async def clear_clips(project_id: str):
         for p in clips_dir.glob("*"):
             if p.is_file():
                 p.unlink(missing_ok=True)
+    return {"status": "cleared", "project_id": project_id}
+
+
+@router.post("/{project_id}/sfx")
+async def generate_sfx(project_id: str, body: dict):
+    """Genera un foley con ElevenLabs y lo guarda en el proyecto.
+
+    Body: {"prompt": "referee whistle blowing", "duration": 2}  (duration opcional, 0.5-22s)
+    El prompt funciona mejor en inglés.
+    """
+    if not project_service.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Falta 'prompt' con la descripción del sonido")
+
+    duration = body.get("duration")
+    if duration is not None and not 0.5 <= float(duration) <= 22:
+        raise HTTPException(status_code=400, detail="duration debe estar entre 0.5 y 22 segundos")
+
+    try:
+        dest = await sfx_service.generate_sfx(project_id, prompt, duration)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"status": "generated", "project_id": project_id, "file": dest.name}
+
+
+@router.get("/{project_id}/sfx")
+async def list_sfx(project_id: str):
+    """Lista los foleys generados del proyecto."""
+    d = sfx_service.sfx_dir(project_id)
+    if not d.exists():
+        return {"sfx": [], "total": 0}
+    names = [p.name for p in sorted(d.glob("*.mp3"))]
+    return {"sfx": names, "total": len(names)}
+
+
+@router.get("/{project_id}/sfx/{filename}")
+async def download_sfx(project_id: str, filename: str):
+    """Descarga un foley del proyecto."""
+    path = sfx_service.sfx_dir(project_id) / Path(filename).name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Foley no encontrado")
+    return FileResponse(str(path), filename=path.name)
+
+
+@router.delete("/{project_id}/sfx")
+async def clear_sfx(project_id: str):
+    """Borra todos los foleys del proyecto."""
+    d = sfx_service.sfx_dir(project_id)
+    if d.exists():
+        for p in d.glob("*.mp3"):
+            p.unlink(missing_ok=True)
     return {"status": "cleared", "project_id": project_id}
 
 
