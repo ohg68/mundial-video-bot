@@ -105,26 +105,58 @@ def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool
     )
 
 
+async def _compress_for_telegram(src: Path) -> Optional[Path]:
+    """Comprime el video a una versión liviana (720p, más compresión) para caber bajo
+    el límite de 50MB de la API de bots de Telegram. Devuelve la ruta o None si falla."""
+    out = src.with_name(src.stem + "_tg.mp4")
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-i", str(src),
+        "-vf", "scale=720:1280:force_original_aspect_ratio=decrease",
+        "-c:v", "libx264", "-crf", "30", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+        str(out),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    if proc.returncode == 0 and out.exists() and out.stat().st_size > 10000:
+        return out
+    return None
+
+
 async def _send_video(bot, chat_id: int, path: Path, caption: str = ""):
     size_mb = path.stat().st_size / 1024 / 1024
-    with open(path, "rb") as f:
-        if size_mb <= 50:
-            await bot.send_video(
-                chat_id, f,
-                caption=caption,
-                parse_mode="Markdown",
-                supports_streaming=True,
-                read_timeout=120,
-                write_timeout=120,
-            )
-        else:
-            await bot.send_document(
-                chat_id, f,
-                caption=f"{caption}\n_(archivo {size_mb:.0f}MB enviado como documento)_",
-                parse_mode="Markdown",
-                read_timeout=120,
-                write_timeout=120,
-            )
+    send_path = path
+    extra = ""
+
+    # La API de bots de Telegram topa en 50MB (video Y documento). Si pesa más,
+    # mandamos una versión comprimida a 720p que sí entra.
+    if size_mb > 49:
+        compressed = await _compress_for_telegram(path)
+        if compressed:
+            send_path = compressed
+            new_mb = send_path.stat().st_size / 1024 / 1024
+            extra = f"\n_(versión liviana {new_mb:.0f}MB — el original de {size_mb:.0f}MB supera el límite de Telegram)_"
+            size_mb = new_mb
+
+    if size_mb > 49:
+        # Ni comprimido entra (video muy largo): avisar en vez de fallar con 413.
+        await bot.send_message(
+            chat_id,
+            f"{caption}\n\n⚠️ El video pesa {size_mb:.0f}MB y supera el límite de 50MB de Telegram. "
+            f"Usá *Descargar* para bajarlo, o hacelo más corto.",
+            parse_mode="Markdown",
+        )
+        return
+
+    with open(send_path, "rb") as f:
+        await bot.send_video(
+            chat_id, f,
+            caption=caption + extra,
+            parse_mode="Markdown",
+            supports_streaming=True,
+            read_timeout=180,
+            write_timeout=180,
+        )
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
