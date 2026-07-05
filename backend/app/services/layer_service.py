@@ -46,6 +46,28 @@ def _ensure_google_credentials():
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_GOOGLE_CRED_PATH)
 
 
+# Idiomas soportados: código → (nombre para el prompt del guion, voz edge-tts por defecto).
+LANG_INFO = {
+    "es": ("español",             "es-ES-AlvaroNeural"),
+    "en": ("English",             "en-US-GuyNeural"),
+    "pt": ("português do Brasil",  "pt-BR-AntonioNeural"),
+    "fr": ("français",            "fr-FR-HenriNeural"),
+    "de": ("Deutsch",             "de-DE-ConradNeural"),
+    "it": ("italiano",            "it-IT-DiegoNeural"),
+}
+
+
+def _resolve_voice(config: ProjectConfig) -> str:
+    """Voz edge-tts: prioriza voice_name (idioma libre); si no, el enum; si no, por idioma."""
+    vn = getattr(config.audio, "voice_name", None)
+    if vn:
+        return vn
+    try:
+        return config.audio.voice.value
+    except Exception:
+        return LANG_INFO.get(getattr(config, "language", "es"), LANG_INFO["es"])[1]
+
+
 async def generate_script(project_id: str, config: ProjectConfig) -> str:
     project_service.update_layer_status(project_id, "audio", LayerStatus.pending)
 
@@ -56,8 +78,10 @@ async def generate_script(project_id: str, config: ProjectConfig) -> str:
     if config.match_date:
         extra += f"\nFecha: {config.match_date}"
 
+    lang_name = LANG_INFO.get(getattr(config, "language", "es"), LANG_INFO["es"])[0]
     prompt = f"""Eres un guionista de videos cortos para redes sociales (YouTube Shorts, TikTok, Reels).
-Genera un guion en español para un video corto de ~90 segundos sobre el siguiente tema.
+Genera un guion EN {lang_name} para un video corto de ~90 segundos sobre el siguiente tema.
+El guion completo debe estar escrito en {lang_name}.
 
 Título: {config.title}
 Tema: {config.topic}{extra}
@@ -108,7 +132,7 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
     output_path = project_service.get_layer_path(project_id, "audio")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    voice = config.audio.voice.value if config.audio.custom_file is None else None
+    voice = _resolve_voice(config) if config.audio.custom_file is None else None
     provider = getattr(config.audio, "tts_provider", None)
     provider = provider.value if hasattr(provider, "value") else provider
 
@@ -286,7 +310,7 @@ def _get_whisper():
     return _whisper_model
 
 
-def _subtitles_with_whisper(audio_path: Path, script: str = "") -> str:
+def _subtitles_with_whisper(audio_path: Path, script: str = "", language: str = "es") -> str:
     """Escucha el audio con Whisper y devuelve un .srt con tiempos reales.
 
     Si se pasa el guion, usa la ortografía del guion con los tiempos de Whisper
@@ -296,7 +320,7 @@ def _subtitles_with_whisper(audio_path: Path, script: str = "") -> str:
     try:
         model = _get_whisper()
         segments, info = model.transcribe(
-            str(audio_path), language="es", word_timestamps=True
+            str(audio_path), language=language, word_timestamps=True
         )
         words = []
         for seg in segments:
@@ -416,15 +440,17 @@ async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> P
     # Obtener guión y voz reales (de config si viene, si no del proyecto guardado)
     if config is not None:
         script = config.script
-        voice = config.audio.voice.value
+        voice = _resolve_voice(config)
         speed = config.audio.speed
+        lang = getattr(config, "language", "es")
     else:
         meta = project_service.get_project(project_id)
         cfg = meta.get("config", {}) if meta else {}
         script = cfg.get("script")
         audio_cfg = cfg.get("audio", {})
-        voice = audio_cfg.get("voice") or "es-ES-AlvaroNeural"
+        voice = audio_cfg.get("voice_name") or audio_cfg.get("voice") or "es-ES-AlvaroNeural"
         speed = audio_cfg.get("speed", 1.0)
+        lang = cfg.get("language", "es")
 
     if not script:
         project_service.update_layer_status(project_id, "subtitles", LayerStatus.error, {
@@ -439,7 +465,7 @@ async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> P
     #    rango de voz detectado. 3) Sin audio aún: edge-tts (más abajo).
     audio_path = project_service.get_layer_path(project_id, "audio")
     if audio_path.exists():
-        srt = _subtitles_with_whisper(audio_path, script=script)
+        srt = _subtitles_with_whisper(audio_path, script=script, language=lang)
         if not srt:
             dur = _audio_duration(audio_path)
             if dur > 0:

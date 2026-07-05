@@ -60,6 +60,8 @@ class VideoLayerConfig(BaseModel):
 
 class AudioLayerConfig(BaseModel):
     voice: VoiceModel = VoiceModel.alvaro
+    # Voz edge-tts libre (para idiomas fuera del enum). Si está seteada, tiene prioridad.
+    voice_name: Optional[str] = None
     tts_provider: TTSProvider = TTSProvider.edge
     openai_voice: str = "onyx"
     elevenlabs_voice_id: Optional[str] = None

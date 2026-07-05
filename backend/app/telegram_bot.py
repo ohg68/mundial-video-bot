@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 (WAITING_TITLE, WAITING_TOPIC, WAITING_SOURCE,
  WAITING_LAYER_ACTION, WAITING_AUDIO_VOICE, WAITING_AUDIO_SPEED,
  WAITING_VIDEO_SOURCE, WAITING_FILE_UPLOAD,
- WAITING_SCRIPT_EDIT, WAITING_GDRIVE_FOLDER) = range(10)
+ WAITING_SCRIPT_EDIT, WAITING_GDRIVE_FOLDER, WAITING_LANG) = range(11)
 
 # ── Seguridad ─────────────────────────────────────────────────────────────────
 
@@ -91,14 +91,17 @@ def _owns(project_id: str, chat_id: int):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool = False,
-                  gdrive_folder_id: str = None) -> ProjectConfig:
+                  gdrive_folder_id: str = None, language: str = "es") -> ProjectConfig:
+    from app.services.layer_service import LANG_INFO
+    voice_name = LANG_INFO.get(language, LANG_INFO["es"])[1]
     return ProjectConfig(
         title=title,
         topic=topic,
         aspect="9:16",
+        language=language,
         video=VideoLayerConfig(source=VideoSource(source), clip_duration=4, ab_split=ab_split,
                                gdrive_folder_id=gdrive_folder_id),
-        audio=AudioLayerConfig(speed=1.1, volume=0.9),
+        audio=AudioLayerConfig(speed=1.1, volume=0.9, voice_name=voice_name),
         music=MusicLayerConfig(volume=0.25, fade_in=2, fade_out=3),
         subtitles=SubtitleLayerConfig(font_size=48, color="white", outline=True, position="bottom"),
         overlay=OverlayLayerConfig(),
@@ -162,12 +165,13 @@ async def _send_video(bot, chat_id: int, path: Path, caption: str = ""):
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str, ab_split: bool = False,
-                        gdrive_folder_id: str = None):
+                        gdrive_folder_id: str = None, language: str = "es"):
     """Genera el video completo y lo entrega por Telegram."""
     project_id = None
     try:
         # 1. Crear proyecto (owner = chat_id de Telegram para aislamiento por usuario)
-        config = _build_config(title, topic, source, ab_split=ab_split, gdrive_folder_id=gdrive_folder_id)
+        config = _build_config(title, topic, source, ab_split=ab_split,
+                               gdrive_folder_id=gdrive_folder_id, language=language)
         meta = project_service.create_project(config, owner_id=chat_id)
         project_id = meta["id"]
 
@@ -547,13 +551,12 @@ async def on_titulo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_TOPIC
 
 
-async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topic = await _input_text(update, context)
-    if not topic:
-        await update.message.reply_text("🤔 No entendí el tema. Inténtalo de nuevo.")
-        return WAITING_TOPIC
-    context.user_data["topic"] = topic
+_LANGS = [("🇪🇸 Español", "es"), ("🇺🇸 English", "en"), ("🇧🇷 Português", "pt"),
+          ("🇫🇷 Français", "fr"), ("🇩🇪 Deutsch", "de"), ("🇮🇹 Italiano", "it")]
 
+
+def _source_keyboard() -> InlineKeyboardMarkup:
+    """Teclado de fuentes de video (solo muestra las que están configuradas)."""
     keyboard = [
         [InlineKeyboardButton("📷 Fotos de Internet (Ken Burns)", callback_data="src_photos")],
         [InlineKeyboardButton("🏛️ Wikimedia (histórico/libre)", callback_data="src_wiki")],
@@ -562,7 +565,6 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔀 Mix Fotos + Video", callback_data="src_mixed_photos")],
         [InlineKeyboardButton("🎯 A/B guiado (imágenes siguen el guion)", callback_data="src_ab")],
     ]
-    # Fuentes que solo aparecen si están configuradas (evita botones muertos)
     from app.services import gdrive_service
     if gdrive_service.is_configured():
         keyboard.append([InlineKeyboardButton("📁 Mis videos de Google Drive", callback_data="src_gdrive")])
@@ -570,10 +572,36 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("🎞️ Video Clips (Pixabay)", callback_data="src_pixabay")])
     if os.getenv("COVERR_API_KEY"):
         keyboard.append([InlineKeyboardButton("🎬 Video Clips (Coverr)", callback_data="src_coverr")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = await _input_text(update, context)
+    if not topic:
+        await update.message.reply_text("🤔 No entendí el tema. Inténtalo de nuevo.")
+        return WAITING_TOPIC
+    context.user_data["topic"] = topic
+
+    rows = [[InlineKeyboardButton(label, callback_data=f"lang_{code}")] for label, code in _LANGS]
     await update.message.reply_text(
         f"✅ Tema: *{context.user_data['topic']}*\n\n"
-        "¿Qué tipo de *fuente de video* usamos?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "¿En qué *idioma* querés el video? (guion + voz + subtítulos)",
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode="Markdown",
+    )
+    return WAITING_LANG
+
+
+async def on_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Idioma elegido (lang_<code>): guarda y pasa a elegir la fuente de video."""
+    query = update.callback_query
+    await query.answer()
+    code = query.data.split("_", 1)[1]
+    context.user_data["language"] = code
+    label = next((l for l, c in _LANGS if c == code), code)
+    await query.edit_message_text(
+        f"✅ Idioma: *{label}*\n\n¿Qué tipo de *fuente de video* usamos?",
+        reply_markup=_source_keyboard(),
         parse_mode="Markdown",
     )
     return WAITING_SOURCE
@@ -624,7 +652,9 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-    asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source, ab_split=ab_split))
+    lang = context.user_data.get("language", "es")
+    asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source,
+                                      ab_split=ab_split, language=lang))
     return ConversationHandler.END
 
 
@@ -645,8 +675,10 @@ async def on_gdrive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
+    lang = context.user_data.get("language", "es")
     asyncio.create_task(_run_pipeline(
-        context.application.bot, chat_id, title, topic, "gdrive", gdrive_folder_id=folder_id))
+        context.application.bot, chat_id, title, topic, "gdrive",
+        gdrive_folder_id=folder_id, language=lang))
     return ConversationHandler.END
 
 
@@ -1681,6 +1713,7 @@ def build_app(token: str) -> Application:
         states={
             WAITING_TITLE: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_titulo)],
             WAITING_TOPIC: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_tema)],
+            WAITING_LANG: [CallbackQueryHandler(on_lang, pattern="^lang_")],
             WAITING_SOURCE: [CallbackQueryHandler(on_fuente, pattern="^src_")],
             WAITING_GDRIVE_FOLDER: [CallbackQueryHandler(on_gdrive_folder, pattern="^gdf_")],
         },
