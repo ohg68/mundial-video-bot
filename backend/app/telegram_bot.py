@@ -567,6 +567,8 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("📁 Mis videos de Google Drive", callback_data="src_gdrive")])
     if os.getenv("PIXABAY_API_KEY"):
         keyboard.append([InlineKeyboardButton("🎞️ Video Clips (Pixabay)", callback_data="src_pixabay")])
+    if os.getenv("COVERR_API_KEY"):
+        keyboard.append([InlineKeyboardButton("🎬 Video Clips (Coverr)", callback_data="src_coverr")])
     await update.message.reply_text(
         f"✅ Tema: *{context.user_data['topic']}*\n\n"
         "¿Qué tipo de *fuente de video* usamos?",
@@ -604,6 +606,7 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "src_mixed_photos": ("mixed_photos", "🔀 Mix Fotos + Video", False),
         "src_ab": ("photos", "🎯 A/B guiado por guion", True),
         "src_pixabay": ("pixabay", "🎞️ Video Clips Pixabay", False),
+        "src_coverr": ("coverr", "🎬 Video Clips Coverr", False),
         "src_stock": ("stock", "🎞️ Máxima variedad (todos los bancos)", False),
     }
     source, label, ab_split = src_map.get(query.data, ("pexels", "🎬 Video Clips Pexels", False))
@@ -1296,7 +1299,7 @@ async def on_regen_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Cambiar la fuente de video de un proyecto existente ────────────────────────
 # Códigos cortos (sin '_') para meterlos en callback_data junto al project_id.
 _SRC_CODES = {"ph": "photos", "px": "pexels", "mx": "mixed_photos", "pb": "pixabay",
-              "ab": "photos", "st": "stock"}
+              "ab": "photos", "st": "stock", "cv": "coverr"}
 
 
 async def on_edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1320,6 +1323,8 @@ async def on_edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append([InlineKeyboardButton("📁 Google Drive", callback_data=f"chsrc_gd_{project_id}")])
     if os.getenv("PIXABAY_API_KEY"):
         rows.append([InlineKeyboardButton("🎞️ Pixabay", callback_data=f"chsrc_pb_{project_id}")])
+    if os.getenv("COVERR_API_KEY"):
+        rows.append([InlineKeyboardButton("🎬 Coverr", callback_data=f"chsrc_cv_{project_id}")])
     rows.append([InlineKeyboardButton("◀️ Volver", callback_data=f"layer_video_{project_id}")])
     await query.edit_message_text(
         "🎬 *Elegí la nueva fuente de video:*",

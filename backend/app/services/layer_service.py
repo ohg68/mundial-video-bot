@@ -610,6 +610,32 @@ async def fetch_pixabay_clips(query: str, count: int = 8) -> list:
         return []
 
 
+async def fetch_coverr_clips(query: str, count: int = 8) -> list:
+    """Clips de video de Coverr (stock gratis). Requiere COVERR_API_KEY."""
+    key = os.getenv("COVERR_API_KEY")
+    if not key:
+        log.warning("COVERR_API_KEY no configurada — Coverr deshabilitado")
+        return []
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.coverr.co/videos",
+                params={"query": query, "page_size": max(count, 3), "urls": "true", "api_key": key},
+                timeout=15,
+            )
+        data = resp.json()
+        urls = []
+        for hit in data.get("hits", []):
+            u = hit.get("urls", {})
+            link = u.get("mp4_download") or u.get("mp4")
+            if link:
+                urls.append(link)
+        return urls[:count]
+    except Exception as e:
+        log.warning(f"Coverr clips error: {e}")
+        return []
+
+
 async def _download_clips(urls: list, dest_dir: Path, prefix: str) -> list:
     """Descarga clips en paralelo, validando status_code. Devuelve paths válidos."""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -842,6 +868,13 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         clips.extend(await _download_clips(pix_urls, dl_dir, "pixabay"))
 
+    # ── Coverr clips ───────────────────────────────────────────────
+    if config.video.source == VideoSource.coverr and len(clips) < _target_shots:
+        cov_query = " ".join(config.topic.split()[:4])
+        cov_urls = await fetch_coverr_clips(cov_query, _target_shots - len(clips))
+        dl_dir = Path("projects") / project_id / "video" / "downloads"
+        clips.extend(await _download_clips(cov_urls, dl_dir, "coverr"))
+
     # ── Máxima variedad: todos los bancos de stock disponibles ─────
     if config.video.source == VideoSource.stock:
         q = " ".join(config.topic.split()[:4])
@@ -850,7 +883,8 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         clips.extend(await _download_clips(pexels_urls, dl_dir, "pexels"))
         pix_urls = await fetch_pixabay_clips(q, _target_shots)
         clips.extend(await _download_clips(pix_urls, dl_dir, "pixabay"))
-        # (Coverr y otros bancos se suman aquí cuando estén disponibles)
+        cov_urls = await fetch_coverr_clips(q, _target_shots)
+        clips.extend(await _download_clips(cov_urls, dl_dir, "coverr"))
 
     if not clips:
         if config.video.source == VideoSource.gdrive:
@@ -866,7 +900,7 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     # larguísimas y estáticas. Cortamos en tomas de ~clip_duration s siguiendo el audio,
     # reciclando y variando los clips. Las fotos ya vienen con buena cadencia (se saltean).
     _CADENCE_SRC = (VideoSource.pexels, VideoSource.pixabay, VideoSource.local,
-                    VideoSource.mixed, VideoSource.gdrive, VideoSource.stock)
+                    VideoSource.mixed, VideoSource.gdrive, VideoSource.stock, VideoSource.coverr)
     audio_path = project_service.get_layer_path(project_id, "audio")
     if config.video.source in _CADENCE_SRC and audio_path.exists():
         audio_dur = await _get_audio_duration(audio_path)
