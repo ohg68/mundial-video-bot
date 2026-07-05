@@ -12,6 +12,7 @@ class VideoSource(str, Enum):
     photos = "photos"
     mixed_photos = "mixed_photos"
     gdrive = "gdrive"
+    stock = "stock"  # Máxima variedad: mezcla todos los bancos de stock disponibles
 
 class TTSProvider(str, Enum):
     edge = "edge"

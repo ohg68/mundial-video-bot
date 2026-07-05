@@ -842,6 +842,16 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         clips.extend(await _download_clips(pix_urls, dl_dir, "pixabay"))
 
+    # ── Máxima variedad: todos los bancos de stock disponibles ─────
+    if config.video.source == VideoSource.stock:
+        q = " ".join(config.topic.split()[:4])
+        dl_dir = Path("projects") / project_id / "video" / "downloads"
+        pexels_urls = await fetch_pexels_clips(q, _target_shots)
+        clips.extend(await _download_clips(pexels_urls, dl_dir, "pexels"))
+        pix_urls = await fetch_pixabay_clips(q, _target_shots)
+        clips.extend(await _download_clips(pix_urls, dl_dir, "pixabay"))
+        # (Coverr y otros bancos se suman aquí cuando estén disponibles)
+
     if not clips:
         if config.video.source == VideoSource.gdrive:
             err = ("Sin clips de Google Drive. Verifica que la carpeta tenga videos y esté "
@@ -856,7 +866,7 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     # larguísimas y estáticas. Cortamos en tomas de ~clip_duration s siguiendo el audio,
     # reciclando y variando los clips. Las fotos ya vienen con buena cadencia (se saltean).
     _CADENCE_SRC = (VideoSource.pexels, VideoSource.pixabay, VideoSource.local,
-                    VideoSource.mixed, VideoSource.gdrive)
+                    VideoSource.mixed, VideoSource.gdrive, VideoSource.stock)
     audio_path = project_service.get_layer_path(project_id, "audio")
     if config.video.source in _CADENCE_SRC and audio_path.exists():
         audio_dur = await _get_audio_duration(audio_path)

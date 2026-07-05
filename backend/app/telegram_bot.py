@@ -557,6 +557,7 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📷 Fotos de Internet (Ken Burns)", callback_data="src_photos")],
         [InlineKeyboardButton("🎬 Video Clips (Pexels)", callback_data="src_pexels")],
+        [InlineKeyboardButton("🎞️ Máxima variedad (todos los bancos)", callback_data="src_stock")],
         [InlineKeyboardButton("🔀 Mix Fotos + Video", callback_data="src_mixed_photos")],
         [InlineKeyboardButton("🎯 A/B guiado (imágenes siguen el guion)", callback_data="src_ab")],
     ]
@@ -603,6 +604,7 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "src_mixed_photos": ("mixed_photos", "🔀 Mix Fotos + Video", False),
         "src_ab": ("photos", "🎯 A/B guiado por guion", True),
         "src_pixabay": ("pixabay", "🎞️ Video Clips Pixabay", False),
+        "src_stock": ("stock", "🎞️ Máxima variedad (todos los bancos)", False),
     }
     source, label, ab_split = src_map.get(query.data, ("pexels", "🎬 Video Clips Pexels", False))
 
@@ -1293,7 +1295,8 @@ async def on_regen_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Cambiar la fuente de video de un proyecto existente ────────────────────────
 # Códigos cortos (sin '_') para meterlos en callback_data junto al project_id.
-_SRC_CODES = {"ph": "photos", "px": "pexels", "mx": "mixed_photos", "pb": "pixabay", "ab": "photos"}
+_SRC_CODES = {"ph": "photos", "px": "pexels", "mx": "mixed_photos", "pb": "pixabay",
+              "ab": "photos", "st": "stock"}
 
 
 async def on_edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1308,6 +1311,7 @@ async def on_edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = [
         [InlineKeyboardButton("📷 Fotos", callback_data=f"chsrc_ph_{project_id}"),
          InlineKeyboardButton("🎬 Pexels", callback_data=f"chsrc_px_{project_id}")],
+        [InlineKeyboardButton("🎞️ Máxima variedad", callback_data=f"chsrc_st_{project_id}")],
         [InlineKeyboardButton("🔀 Mix", callback_data=f"chsrc_mx_{project_id}"),
          InlineKeyboardButton("🎯 A/B guiado", callback_data=f"chsrc_ab_{project_id}")],
     ]
