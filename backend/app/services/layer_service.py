@@ -653,6 +653,46 @@ async def _get_audio_duration(path: Path) -> float:
         return 0.0
 
 
+async def _apply_cut_cadence(source_clips: list, total_dur: float, shot_dur: float,
+                             aspect: str, dest_dir: Path) -> list:
+    """Trocea los clips fuente en tomas cortas de ~shot_dur s que cubran total_dur.
+    Recicla y varía los clips (offsets que avanzan) para lograr un corte cada pocos
+    segundos aunque haya pocos clips. Devuelve la lista de tomas (o las fuentes si falla)."""
+    if not source_clips or total_dur <= 0 or shot_dur <= 0:
+        return source_clips
+    w, h = (1080, 1920) if aspect == "9:16" else (1920, 1080)
+    n_shots = max(1, round(total_dur / shot_dur))
+    # Duración de cada fuente (para variar el punto de corte al reciclar)
+    durs = []
+    for c in source_clips:
+        d = await _get_audio_duration(c)
+        durs.append(d if d and d > 0 else shot_dur)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    offsets = [0.0] * len(source_clips)
+    shots = []
+    for i in range(n_shots):
+        idx = i % len(source_clips)
+        src, sdur, start = source_clips[idx], durs[idx], offsets[idx]
+        if start + shot_dur > sdur:      # se acabó el clip → volver al inicio
+            start = 0.0
+        offsets[idx] = start + shot_dur
+        out = dest_dir / f"shot_{i:03d}.mp4"
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(src), "-t", f"{shot_dur:.2f}",
+            "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
+            "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-an",
+            str(out),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode == 0 and out.exists() and out.stat().st_size > 10000:
+            shots.append(out)
+        else:
+            log.warning(f"cadencia: toma {i} falló ({src.name}): {stderr.decode()[-200:]}")
+    log.info(f"Cadencia de cortes: {len(shots)} tomas de ~{shot_dur}s (de {len(source_clips)} clips)")
+    return shots or source_clips
+
+
 async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     # Clips propios subidos por el usuario (endpoint /upload-clips): tienen
     # prioridad sobre cualquier fuente (Pexels, fotos, A/B) y se cortan por
@@ -781,6 +821,21 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             err = "Sin clips disponibles. Configura PEXELS_API_KEY o PIXABAY_API_KEY en Railway."
         project_service.update_layer_status(project_id, "video", LayerStatus.error, {"error": err})
         return None
+
+    # ── Cadencia de cortes ─────────────────────────────────────────
+    # Las fuentes de video concatenan clips completos → con pocos clips quedan tomas
+    # larguísimas y estáticas. Cortamos en tomas de ~clip_duration s siguiendo el audio,
+    # reciclando y variando los clips. Las fotos ya vienen con buena cadencia (se saltean).
+    _CADENCE_SRC = (VideoSource.pexels, VideoSource.pixabay, VideoSource.local,
+                    VideoSource.mixed, VideoSource.gdrive)
+    audio_path = project_service.get_layer_path(project_id, "audio")
+    if config.video.source in _CADENCE_SRC and audio_path.exists():
+        audio_dur = await _get_audio_duration(audio_path)
+        if audio_dur > 0:
+            shot_dur = float(config.video.clip_duration or 4)
+            clips = await _apply_cut_cadence(
+                clips, audio_dur, shot_dur, aspect,
+                Path("projects") / project_id / "video" / "shots")
 
     list_file = Path("projects") / project_id / "video" / "clips.txt"
     list_file.write_text("\n".join(f"file '{c.resolve()}'" for c in clips))
