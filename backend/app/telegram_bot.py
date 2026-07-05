@@ -1253,6 +1253,91 @@ async def on_regen_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ── Cambiar la fuente de video de un proyecto existente ────────────────────────
+# Códigos cortos (sin '_') para meterlos en callback_data junto al project_id.
+_SRC_CODES = {"ph": "photos", "px": "pexels", "mx": "mixed_photos", "pb": "pixabay", "ab": "photos"}
+
+
+async def on_edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Botón 'Cambiar fuente' (edit_video_<id>): muestra el selector de fuentes."""
+    query = update.callback_query
+    await query.answer()
+    project_id = query.data.split("_")[-1]
+    meta = _owns(project_id, query.message.chat_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado o no es tuyo.")
+        return
+    rows = [
+        [InlineKeyboardButton("📷 Fotos", callback_data=f"chsrc_ph_{project_id}"),
+         InlineKeyboardButton("🎬 Pexels", callback_data=f"chsrc_px_{project_id}")],
+        [InlineKeyboardButton("🔀 Mix", callback_data=f"chsrc_mx_{project_id}"),
+         InlineKeyboardButton("🎯 A/B guiado", callback_data=f"chsrc_ab_{project_id}")],
+    ]
+    from app.services import gdrive_service
+    if gdrive_service.is_configured():
+        rows.append([InlineKeyboardButton("📁 Google Drive", callback_data=f"chsrc_gd_{project_id}")])
+    if os.getenv("PIXABAY_API_KEY"):
+        rows.append([InlineKeyboardButton("🎞️ Pixabay", callback_data=f"chsrc_pb_{project_id}")])
+    rows.append([InlineKeyboardButton("◀️ Volver", callback_data=f"layer_video_{project_id}")])
+    await query.edit_message_text(
+        "🎬 *Elegí la nueva fuente de video:*",
+        reply_markup=InlineKeyboardMarkup(rows), parse_mode="Markdown")
+
+
+def _apply_video_source(project_id: str, meta: dict, **overrides) -> ProjectConfig:
+    """Actualiza el sub-dict video de la config (merge) y devuelve el ProjectConfig nuevo."""
+    vcfg = {**meta.get("config", {}).get("video", {}), **overrides}
+    project_service.update_project_config(project_id, {"video": vcfg})
+    fresh = project_service.get_project(project_id)
+    return ProjectConfig(**fresh["config"])
+
+
+async def on_change_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """chsrc_<code>_<pid>: aplica la fuente elegida y regenera (o pide carpeta si es Drive)."""
+    query = update.callback_query
+    await query.answer()
+    _, code, project_id = query.data.split("_", 2)
+    chat_id = query.message.chat_id
+    meta = _owns(project_id, chat_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado o no es tuyo.")
+        return
+
+    if code == "gd":
+        from app.services import gdrive_service
+        folders = gdrive_service.list_folders()
+        if not folders:
+            await query.edit_message_text("📁 No hay carpetas compartidas con la cuenta de servicio.")
+            return
+        rows = [[InlineKeyboardButton(f"📁 {f['name'][:40]}", callback_data=f"chgdf_{project_id}_{f['id']}")]
+                for f in folders[:12]]
+        await query.edit_message_text(
+            "📁 *Elegí la carpeta de Google Drive:*",
+            reply_markup=InlineKeyboardMarkup(rows), parse_mode="Markdown")
+        return
+
+    source = _SRC_CODES.get(code, "pexels")
+    ab_split = (code == "ab")
+    config = _apply_video_source(project_id, meta, source=source, ab_split=ab_split)
+    await query.edit_message_text(f"🎬 Fuente cambiada — regenerando video con *{source}*...", parse_mode="Markdown")
+    asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, "video", config))
+
+
+async def on_change_gdrive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """chgdf_<pid>_<folderid>: fija fuente gdrive + carpeta y regenera (split(_,2) preserva el id)."""
+    query = update.callback_query
+    await query.answer()
+    _, project_id, folder_id = query.data.split("_", 2)
+    chat_id = query.message.chat_id
+    meta = _owns(project_id, chat_id)
+    if not meta:
+        await query.edit_message_text("❌ Proyecto no encontrado o no es tuyo.")
+        return
+    config = _apply_video_source(project_id, meta, source="gdrive", gdrive_folder_id=folder_id, ab_split=False)
+    await query.edit_message_text("📁 Fuente cambiada a *Google Drive* — regenerando video...", parse_mode="Markdown")
+    asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, "video", config))
+
+
 async def on_regen_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Regenerar subtítulos."""
     query = update.callback_query
@@ -1518,6 +1603,10 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_regen_audio, pattern="^regen_audio_"))
     application.add_handler(CallbackQueryHandler(on_regen_video, pattern="^regen_video_"))
     application.add_handler(CallbackQueryHandler(on_regen_subs, pattern="^regen_subs_"))
+    # Cambiar la fuente de video de un proyecto existente
+    application.add_handler(CallbackQueryHandler(on_edit_video, pattern="^edit_video_"))
+    application.add_handler(CallbackQueryHandler(on_change_source, pattern="^chsrc_"))
+    application.add_handler(CallbackQueryHandler(on_change_gdrive_folder, pattern="^chgdf_"))
     application.add_handler(CallbackQueryHandler(on_substyle, pattern="^substyle_"))
     application.add_handler(CallbackQueryHandler(on_sub_set, pattern="^(subsz|subps)_"))
     application.add_handler(CallbackQueryHandler(on_subrender, pattern="^subrender_"))
