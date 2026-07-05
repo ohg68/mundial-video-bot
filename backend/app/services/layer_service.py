@@ -655,32 +655,52 @@ async def _get_audio_duration(path: Path) -> float:
 
 async def _apply_cut_cadence(source_clips: list, total_dur: float, shot_dur: float,
                              aspect: str, dest_dir: Path) -> list:
-    """Trocea los clips fuente en tomas cortas de ~shot_dur s que cubran total_dur.
-    Recicla y varía los clips (offsets que avanzan) para lograr un corte cada pocos
-    segundos aunque haya pocos clips. Devuelve la lista de tomas (o las fuentes si falla)."""
+    """Trocea los clips fuente en tomas de ~shot_dur s que cubran total_dur, usando
+    SEGMENTOS ÚNICOS no solapados y barajados para no repetir imágenes. Solo repite
+    (re-barajando, sin tomas idénticas consecutivas) si no hay material suficiente."""
     if not source_clips or total_dur <= 0 or shot_dur <= 0:
         return source_clips
+    import random
     w, h = (1080, 1920) if aspect == "9:16" else (1920, 1080)
     n_shots = max(1, round(total_dur / shot_dur))
-    # Duración de cada fuente (para variar el punto de corte al reciclar)
-    durs = []
-    for c in source_clips:
-        d = await _get_audio_duration(c)
-        durs.append(d if d and d > 0 else shot_dur)
+
+    # Duración de cada fuente → cortar cada clip en segmentos únicos no solapados.
+    segments = []  # (clip_idx, start_sec)
+    for ci, c in enumerate(source_clips):
+        sdur = await _get_audio_duration(c)
+        sdur = sdur if sdur and sdur > 0 else shot_dur
+        if sdur < shot_dur * 0.5:
+            continue  # demasiado corto para una toma útil
+        t, added = 0.0, 0
+        while t + shot_dur <= sdur + 0.01:
+            segments.append((ci, round(t, 2)))
+            t += shot_dur
+            added += 1
+        if added == 0:
+            segments.append((ci, 0.0))
+    if not segments:
+        return source_clips
+
+    # Elegir n_shots segmentos: primero todos los únicos (barajados); si faltan,
+    # se re-baraja el pool, evitando repetir la misma toma de forma consecutiva.
+    chosen, pool, pi = [], [], 0
+    while len(chosen) < n_shots:
+        if pi >= len(pool):
+            pool = list(segments); random.shuffle(pool); pi = 0
+        seg = pool[pi]; pi += 1
+        if chosen and seg == chosen[-1] and len(segments) > 1:
+            continue
+        chosen.append(seg)
+
     dest_dir.mkdir(parents=True, exist_ok=True)
-    offsets = [0.0] * len(source_clips)
     shots = []
-    for i in range(n_shots):
-        idx = i % len(source_clips)
-        src, sdur, start = source_clips[idx], durs[idx], offsets[idx]
-        if start + shot_dur > sdur:      # se acabó el clip → volver al inicio
-            start = 0.0
-        offsets[idx] = start + shot_dur
+    for i, (ci, start) in enumerate(chosen):
+        src = source_clips[ci]
         out = dest_dir / f"shot_{i:03d}.mp4"
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(src), "-t", f"{shot_dur:.2f}",
-            # fps=30 fuerza framerate constante: los clips fuente vienen a fps distintos y
-            # sin esto el concat rompe los timestamps (duración inflada, playback raro).
+            # fps=30 CFR: clips fuente vienen a fps distintos; sin esto el concat rompe
+            # los timestamps (duración inflada, playback a saltos).
             "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30",
             "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-r", "30", "-an",
             str(out),
@@ -691,7 +711,8 @@ async def _apply_cut_cadence(source_clips: list, total_dur: float, shot_dur: flo
             shots.append(out)
         else:
             log.warning(f"cadencia: toma {i} falló ({src.name}): {stderr.decode()[-200:]}")
-    log.info(f"Cadencia de cortes: {len(shots)} tomas de ~{shot_dur}s (de {len(source_clips)} clips)")
+    log.info(f"Cadencia: {len(shots)} tomas de ~{shot_dur}s · {len(segments)} segmentos únicos "
+             f"de {len(source_clips)} clips (repetición={'sí' if n_shots > len(segments) else 'no'})")
     return shots or source_clips
 
 
@@ -718,6 +739,16 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
 
     clips: list[Path] = []
     aspect = config.aspect
+
+    # Cuántas tomas necesita el video (según el audio): sirve para bajar suficiente
+    # material único y no tener que repetir imágenes en la cadencia de cortes.
+    _shot_dur = float(config.video.clip_duration or 4)
+    _target_shots = 8
+    _audio_p = project_service.get_layer_path(project_id, "audio")
+    if _audio_p.exists():
+        _ad = await _get_audio_duration(_audio_p)
+        if _ad > 0:
+            _target_shots = max(4, min(30, round(_ad / _shot_dur)))
 
     # ── Photo-based sources ────────────────────────────────────────
     if config.video.source in (VideoSource.photos, VideoSource.mixed_photos):
@@ -783,16 +814,11 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
                 "error": "Falta la carpeta de Google Drive (gdrive_folder_id o GDRIVE_VIDEO_FOLDER_ID).",
             })
             return None
-        n_clips = 6
-        clip_dur = float(config.video.clip_duration or 4)
-        audio_path = project_service.get_layer_path(project_id, "audio")
-        if audio_path.exists():
-            audio_dur = await _get_audio_duration(audio_path)
-            if audio_dur > 0:
-                clip_dur = round(audio_dur / n_clips, 2)
+        # Una descarga por toma (material único), con tope para no bajar de más.
+        n_clips = min(_target_shots, 12)
         gdir = Path("projects") / project_id / "video" / "gdrive"
         clips = await gdrive_service.fetch_gdrive_clips(
-            folder_id, gdir, count=n_clips, duration=clip_dur, aspect=aspect,
+            folder_id, gdir, count=n_clips, duration=_shot_dur, aspect=aspect,
         )
 
     # ── Local clips ────────────────────────────────────────────────
@@ -802,16 +828,17 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             clips = list(clips_dir.glob("*.mp4"))[:8]
 
     # ── Pexels clips ───────────────────────────────────────────────
-    if config.video.source in (VideoSource.pexels, VideoSource.mixed) and len(clips) < 8:
+    # Bajamos ~target_shots clips para tener material único suficiente y no repetir.
+    if config.video.source in (VideoSource.pexels, VideoSource.mixed) and len(clips) < _target_shots:
         pexels_query = " ".join(config.topic.split()[:4])
-        pexels_urls = await fetch_pexels_clips(pexels_query, 8 - len(clips))
+        pexels_urls = await fetch_pexels_clips(pexels_query, _target_shots - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         clips.extend(await _download_clips(pexels_urls, dl_dir, "pexels"))
 
     # ── Pixabay clips ──────────────────────────────────────────────
-    if config.video.source == VideoSource.pixabay and len(clips) < 8:
+    if config.video.source == VideoSource.pixabay and len(clips) < _target_shots:
         pix_query = " ".join(config.topic.split()[:4])
-        pix_urls = await fetch_pixabay_clips(pix_query, 8 - len(clips))
+        pix_urls = await fetch_pixabay_clips(pix_query, _target_shots - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         clips.extend(await _download_clips(pix_urls, dl_dir, "pixabay"))
 
