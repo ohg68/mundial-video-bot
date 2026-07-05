@@ -112,6 +112,23 @@ def _parse_srt(srt_text: str):
     return blocks
 
 
+def _ass_color(color: str) -> str:
+    """Convierte un color (nombre o #RRGGBB) al formato ASS &H00BBGGRR (fill del texto)."""
+    named = {
+        "white": "&H00FFFFFF", "black": "&H00000000", "yellow": "&H0000FFFF",
+        "red": "&H000000FF", "green": "&H0000FF00", "blue": "&H00FF0000",
+        "cyan": "&H00FFFF00", "magenta": "&H00FF00FF", "pink": "&H00B469FF",
+        "orange": "&H0000A5FF",
+    }
+    c = (color or "white").strip().lower()
+    if c in named:
+        return named[c]
+    if c.startswith("#") and len(c) == 7:
+        r, g, b = c[1:3], c[3:5], c[5:7]
+        return f"&H00{b}{g}{r}".upper()
+    return named["white"]
+
+
 def _srt_to_ass(srt_path: Path, ass_path: Path, w: int, h: int, sub_cfg: dict):
     """Convierte SRT a ASS con resolución REAL en el header (FontSize en píxeles
     reales y predecibles) y estilo tipo caption: outline grueso, márgenes y wrap."""
@@ -119,6 +136,7 @@ def _srt_to_ass(srt_path: Path, ass_path: Path, w: int, h: int, sub_cfg: dict):
     font_size = int(sub_cfg.get("font_size", 72))
     position = sub_cfg.get("position", "bottom")
     offset = float(sub_cfg.get("time_offset", 0.0) or 0.0)  # + atrasa, - adelanta
+    primary = _ass_color(sub_cfg.get("color", "white"))     # color de relleno del texto
 
     # Alignment ASS: 2=abajo-centro, 5=medio-centro, 8=arriba-centro
     alignment = {"bottom": 2, "center": 5, "top": 8}.get(position, 2)
@@ -138,7 +156,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},{font_size},&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,{outline},1,{alignment},{margin_lr},{margin_lr},{margin_v},1
+Style: Default,{font},{font_size},{primary},&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,{outline},1,{alignment},{margin_lr},{margin_lr},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

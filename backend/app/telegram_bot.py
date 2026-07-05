@@ -1514,6 +1514,9 @@ async def on_substyle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pos_label = {"top": "arriba", "center": "centro", "bottom": "abajo"}.get(pos, "abajo")
     offset = float(sub_cfg.get("time_offset", 0.0) or 0.0)
     off_label = f"{offset:+.1f}s" if offset else "0s (en sync)"
+    color = (sub_cfg.get("color", "white") or "white").lower()
+    color_es = {"white": "blanco", "yellow": "amarillo", "cyan": "celeste", "green": "verde",
+                "pink": "rosa", "orange": "naranja", "red": "rojo", "black": "negro"}.get(color, color)
 
     kb = [
         [
@@ -1527,6 +1530,16 @@ async def on_substyle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("⬇️ Abajo", callback_data=f"subps_bottom_{project_id}"),
         ],
         [
+            InlineKeyboardButton("⚪ Blanco", callback_data=f"subcol_white_{project_id}"),
+            InlineKeyboardButton("🟡 Amarillo", callback_data=f"subcol_yellow_{project_id}"),
+            InlineKeyboardButton("🔵 Celeste", callback_data=f"subcol_cyan_{project_id}"),
+        ],
+        [
+            InlineKeyboardButton("🟢 Verde", callback_data=f"subcol_green_{project_id}"),
+            InlineKeyboardButton("🩷 Rosa", callback_data=f"subcol_pink_{project_id}"),
+            InlineKeyboardButton("🟠 Naranja", callback_data=f"subcol_orange_{project_id}"),
+        ],
+        [
             InlineKeyboardButton("⏪ Adelantar 0.3s", callback_data=f"suboff_-0.3_{project_id}"),
             InlineKeyboardButton("⏩ Atrasar 0.3s", callback_data=f"suboff_0.3_{project_id}"),
             InlineKeyboardButton("⟲ 0", callback_data=f"suboff_reset_{project_id}"),
@@ -1537,8 +1550,8 @@ async def on_substyle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"📐 *Estilo de subtítulos*\n\n"
         f"Tamaño: *{size}px*  ·  Posición: *{pos_label}*\n"
-        f"Desfase de tiempo: *{off_label}*\n\n"
-        f"Si están a destiempo, usá ⏪/⏩ hasta que sincronicen, "
+        f"Color: *{color_es}*  ·  Desfase: *{off_label}*\n\n"
+        f"Elegí tamaño, posición y color; si están a destiempo usá ⏪/⏩; "
         f"luego *Aplicar y re-renderizar*.",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown",
@@ -1546,10 +1559,10 @@ async def on_substyle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_sub_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Setear tamaño (subsz_) o posición (subps_) de subtítulos."""
+    """Setear tamaño (subsz_), posición (subps_) o color (subcol_) de subtítulos."""
     query = update.callback_query
     parts = query.data.split("_")
-    kind = parts[0]            # 'subsz' o 'subps'
+    kind = parts[0]            # 'subsz' | 'subps' | 'subcol'
     value = parts[1]
     project_id = "_".join(parts[2:])
 
@@ -1562,6 +1575,9 @@ async def on_sub_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if kind == "subsz":
         sub_cfg["font_size"] = int(value)
         await query.answer(f"Tamaño: {value}px")
+    elif kind == "subcol":
+        sub_cfg["color"] = value
+        await query.answer(f"Color: {value}")
     else:
         sub_cfg["position"] = value
         await query.answer(f"Posición: {value}")
@@ -1696,7 +1712,7 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_change_source, pattern="^chsrc_"))
     application.add_handler(CallbackQueryHandler(on_change_gdrive_folder, pattern="^chgdf_"))
     application.add_handler(CallbackQueryHandler(on_substyle, pattern="^substyle_"))
-    application.add_handler(CallbackQueryHandler(on_sub_set, pattern="^(subsz|subps)_"))
+    application.add_handler(CallbackQueryHandler(on_sub_set, pattern="^(subsz|subps|subcol)_"))
     application.add_handler(CallbackQueryHandler(on_sub_offset, pattern="^suboff_"))
     application.add_handler(CallbackQueryHandler(on_subrender, pattern="^subrender_"))
     application.add_handler(CallbackQueryHandler(on_setvoice, pattern="^setvoice_"))
