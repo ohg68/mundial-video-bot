@@ -86,27 +86,80 @@ async def _search_pixabay_photos(query: str, count: int, orientation: str) -> li
         return []
 
 
-async def search_photos(query: str, count: int = 10, orientation: str = "portrait") -> list:
-    """Search photos from Pexels + Pixabay in parallel and interleave results."""
+async def _search_wikimedia_photos(query: str, count: int, orientation: str) -> list:
+    """Wikimedia Commons: imágenes libres, FILTRADAS a dominio público / CC0
+    (sin obligación de atribución, para no necesitar créditos)."""
+    def _is_free(em: dict) -> bool:
+        lic = (em.get("License", {}).get("value") or "").lower()
+        short = (em.get("LicenseShortName", {}).get("value") or "").lower()
+        return (lic == "cc0" or lic.startswith("pd") or "cc-pd" in lic
+                or "public domain" in short or "cc0" in short)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://commons.wikimedia.org/w/api.php",
+                params={
+                    "action": "query", "format": "json",
+                    "generator": "search", "gsrsearch": query,
+                    "gsrnamespace": 6, "gsrlimit": min(count * 5, 50),
+                    "prop": "imageinfo", "iiprop": "url|mime|extmetadata",
+                    "iiurlwidth": 1280,
+                },
+                headers={"User-Agent": "LayerCut/1.0 (video generator)"},
+            )
+        if resp.status_code != 200:
+            log.warning(f"Wikimedia HTTP {resp.status_code}")
+            return []
+        pages = resp.json().get("query", {}).get("pages", {})
+        photos = []
+        for p in pages.values():
+            ii = (p.get("imageinfo") or [{}])[0]
+            if ii.get("mime") not in ("image/jpeg", "image/png"):
+                continue
+            if not _is_free(ii.get("extmetadata", {})):
+                continue
+            url = ii.get("thumburl") or ii.get("url")
+            if not url:
+                continue
+            photos.append({
+                "url": url,
+                "thumbnail": ii.get("thumburl"),
+                "title": p.get("title", ""),
+                "width": ii.get("thumbwidth") or ii.get("width", 0),
+                "height": ii.get("thumbheight") or ii.get("height", 0),
+            })
+        log.info(f"Wikimedia photos (PD/CC0): {len(photos)} for '{query}'")
+        return photos[:count]
+    except Exception as e:
+        log.warning(f"Wikimedia photos error: {e}")
+        return []
+
+
+async def search_photos(query: str, count: int = 10, orientation: str = "portrait",
+                        providers=None) -> list:
+    """Busca fotos en los proveedores dados (por defecto Pexels + Pixabay) y las intercala."""
+    providers = tuple(providers) if providers else ("pexels", "pixabay")
     pixabay_orient = "vertical" if orientation == "portrait" else "horizontal"
 
-    pexels, pixabay = await asyncio.gather(
-        _search_pexels_photos(query, count, orientation),
-        _search_pixabay_photos(query, count, pixabay_orient),
-        return_exceptions=True,
-    )
-    pexels  = pexels  if isinstance(pexels,  list) else []
-    pixabay = pixabay if isinstance(pixabay, list) else []
+    tasks, names = [], []
+    if "pexels" in providers:
+        tasks.append(_search_pexels_photos(query, count, orientation)); names.append("pexels")
+    if "pixabay" in providers:
+        tasks.append(_search_pixabay_photos(query, count, pixabay_orient)); names.append("pixabay")
+    if "wikimedia" in providers:
+        tasks.append(_search_wikimedia_photos(query, count, orientation)); names.append("wikimedia")
 
-    # Interleave so we get variety from both sources
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    lists = [r if isinstance(r, list) else [] for r in results]
+
+    # Intercalar para variar entre fuentes
     interleaved = []
-    for i in range(max(len(pexels), len(pixabay))):
-        if i < len(pexels):
-            interleaved.append(pexels[i])
-        if i < len(pixabay):
-            interleaved.append(pixabay[i])
+    for i in range(max((len(l) for l in lists), default=0)):
+        for l in lists:
+            if i < len(l):
+                interleaved.append(l[i])
 
-    log.info(f"Photos found: {len(pexels)} Pexels + {len(pixabay)} Pixabay for '{query}'")
+    log.info("Photos found: " + ", ".join(f"{len(l)} {n}" for n, l in zip(names, lists)) + f" for '{query}'")
     return interleaved[:count]
 
 
@@ -203,9 +256,11 @@ async def fetch_photo_clips(
     duration: float = 4.0,
     aspect: str = "9:16",
     on_progress=None,
+    providers=None,
 ) -> list[Path]:
-    """Search → download → Ken Burns conversion. Uses Pexels + Pixabay Photos APIs."""
-    log.info(f"[photo] fetch_photo_clips called: query={query!r} count={count} aspect={aspect}")
+    """Search → download → Ken Burns conversion. providers: proveedores de fotos
+    (por defecto Pexels + Pixabay; p.ej. ('wikimedia',) para Commons)."""
+    log.info(f"[photo] fetch_photo_clips called: query={query!r} count={count} aspect={aspect} providers={providers}")
     dest_dir.mkdir(parents=True, exist_ok=True)
     originals_dir = dest_dir / "originals"
     originals_dir.mkdir(exist_ok=True)
@@ -216,8 +271,8 @@ async def fetch_photo_clips(
         if on_progress:
             await on_progress({"type": "progress", "task_type": "video", "progress": pct, "msg": msg})
 
-    await _emit(5, "Buscando fotos (Pexels + Pixabay)...")
-    photos = await search_photos(query, count=count + 4, orientation=orientation)
+    await _emit(5, "Buscando fotos...")
+    photos = await search_photos(query, count=count + 4, orientation=orientation, providers=providers)
     if not photos:
         log.warning(f"No photos found for '{query}'")
         return []

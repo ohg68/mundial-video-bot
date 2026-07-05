@@ -13,6 +13,7 @@ class VideoSource(str, Enum):
     mixed_photos = "mixed_photos"
     gdrive = "gdrive"
     stock = "stock"  # Máxima variedad: mezcla todos los bancos de stock disponibles
+    wikimedia = "wikimedia"  # Imágenes libres (dominio público/CC0) de Wikimedia Commons → Ken Burns
 
 class TTSProvider(str, Enum):
     edge = "edge"

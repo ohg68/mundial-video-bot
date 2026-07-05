@@ -783,15 +783,18 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             _target_shots = max(4, min(30, round(_ad / _shot_dur)))
 
     # ── Photo-based sources ────────────────────────────────────────
-    if config.video.source in (VideoSource.photos, VideoSource.mixed_photos):
+    _photo_only = (VideoSource.photos, VideoSource.wikimedia)
+    if config.video.source in (VideoSource.photos, VideoSource.mixed_photos, VideoSource.wikimedia):
         from app.websocket import manager
 
-        n_photos = 6 if config.video.source == VideoSource.photos else 3
+        n_photos = 6 if config.video.source in _photo_only else 3
+        # Wikimedia = imágenes libres de Commons; el resto usa Pexels+Pixabay fotos.
+        providers = ("wikimedia",) if config.video.source == VideoSource.wikimedia else None
 
         # Match per-clip duration to audio length when available
         clip_dur = float(config.video.clip_duration or 4)
         audio_path = project_service.get_layer_path(project_id, "audio")
-        if audio_path.exists() and config.video.source == VideoSource.photos:
+        if audio_path.exists() and config.video.source in _photo_only:
             audio_dur = await _get_audio_duration(audio_path)
             if audio_dur > 0:
                 clip_dur = round(audio_dur / n_photos, 2)
@@ -807,13 +810,14 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             duration=clip_dur,
             aspect=aspect,
             on_progress=_on_progress,
+            providers=providers,
         )
 
         pexels_query = " ".join(config.topic.split()[:4])
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         dl_dir.mkdir(parents=True, exist_ok=True)
 
-        if config.video.source == VideoSource.photos:
+        if config.video.source in _photo_only:
             if photo_clips:
                 clips = photo_clips
             else:
