@@ -642,6 +642,44 @@ async def fetch_coverr_clips(query: str, count: int = 8) -> list:
         return []
 
 
+async def generate_visual_keywords(config) -> list:
+    """Convierte el tema (y guion) en keywords VISUALES en INGLÉS para buscar stock.
+    Evita que un tema en español ('acceder al mercado portugués') traiga resultados
+    irrelevantes (p.ej. 'mercado' → bazares árabes). Fallback: el tema crudo."""
+    topic = (getattr(config, "topic", "") or "").strip()
+    script = (getattr(config, "script", "") or "")
+    key = os.getenv("DEEPSEEK_API_KEY")
+    if not key or not topic:
+        return [topic] if topic else []
+    prompt = (
+        "Da EXACTAMENTE 5 keywords visuales en INGLÉS (1-3 palabras cada una) para buscar "
+        "stock footage/imágenes que ilustren este video. Deben ser objetos, lugares o acciones "
+        "CONCRETAS y filmables, derivadas del tema (no traduzcas literal frases abstractas). "
+        "Responde SOLO las 5 keywords separadas por coma, sin números ni texto extra.\n"
+        f"Tema: {topic}\nGuion: {script[:400]}"
+    )
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": "deepseek-chat", "max_tokens": 80,
+                      "messages": [{"role": "user", "content": prompt}]},
+                timeout=30,
+            )
+        data = resp.json()
+        if resp.status_code != 200 or "choices" not in data:
+            return [topic]
+        text = data["choices"][0]["message"]["content"].strip()
+        kws = [k.strip(" .-\n\t\"'") for k in text.replace("\n", ",").split(",")]
+        kws = [k for k in kws if 2 <= len(k) <= 40][:6]
+        log.info(f"Keywords visuales para '{topic[:40]}': {kws}")
+        return kws or [topic]
+    except Exception as e:
+        log.warning(f"generate_visual_keywords error: {e}")
+        return [topic]
+
+
 async def _download_clips(urls: list, dest_dir: Path, prefix: str) -> list:
     """Descarga clips en paralelo, validando status_code. Devuelve paths válidos."""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -782,6 +820,21 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         if _ad > 0:
             _target_shots = max(4, min(30, round(_ad / _shot_dur)))
 
+    # Keywords visuales EN INGLÉS (evita buscar con el tema crudo en español, que
+    # trae resultados irrelevantes). _kws se rota entre clips/bancos para relevancia+variedad.
+    _kws = await generate_visual_keywords(config)
+    _pq = _kws[0] if _kws else config.topic  # query primaria para fuentes de una sola búsqueda
+
+    async def _fetch_bank_multi(fetch_fn, count, dl_dir, prefix):
+        """Baja `count` clips de un banco repartidos entre las keywords (relevancia + variedad).
+        Prefijo único por keyword para no pisar archivos entre llamadas."""
+        out, per = [], max(1, count // max(len(_kws), 1)) + 1
+        for ki, kw in enumerate(_kws or [config.topic]):
+            out.extend(await _download_clips(await fetch_fn(kw, per), dl_dir, f"{prefix}{ki}"))
+            if len(out) >= count:
+                break
+        return out[:count]
+
     # ── Photo-based sources ────────────────────────────────────────
     _photo_only = (VideoSource.photos, VideoSource.wikimedia)
     if config.video.source in (VideoSource.photos, VideoSource.mixed_photos, VideoSource.wikimedia):
@@ -804,7 +857,7 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
 
         photo_clips_dir = Path("projects") / project_id / "video" / "photo_clips"
         photo_clips = await photo_sources.fetch_photo_clips(
-            query=config.topic,
+            query=_pq,
             dest_dir=photo_clips_dir,
             count=n_photos,
             duration=clip_dur,
@@ -813,7 +866,7 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             providers=providers,
         )
 
-        pexels_query = " ".join(config.topic.split()[:4])
+        pexels_query = _pq
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         dl_dir.mkdir(parents=True, exist_ok=True)
 
@@ -864,37 +917,28 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
             clips = list(clips_dir.glob("*.mp4"))[:8]
 
     # ── Pexels clips ───────────────────────────────────────────────
-    # Bajamos ~target_shots clips para tener material único suficiente y no repetir.
+    # Bajamos ~target_shots clips (repartidos entre keywords) para tener material
+    # único y relevante, sin repetir.
     if config.video.source in (VideoSource.pexels, VideoSource.mixed) and len(clips) < _target_shots:
-        pexels_query = " ".join(config.topic.split()[:4])
-        pexels_urls = await fetch_pexels_clips(pexels_query, _target_shots - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
-        clips.extend(await _download_clips(pexels_urls, dl_dir, "pexels"))
+        clips.extend(await _fetch_bank_multi(fetch_pexels_clips, _target_shots - len(clips), dl_dir, "pexels"))
 
     # ── Pixabay clips ──────────────────────────────────────────────
     if config.video.source == VideoSource.pixabay and len(clips) < _target_shots:
-        pix_query = " ".join(config.topic.split()[:4])
-        pix_urls = await fetch_pixabay_clips(pix_query, _target_shots - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
-        clips.extend(await _download_clips(pix_urls, dl_dir, "pixabay"))
+        clips.extend(await _fetch_bank_multi(fetch_pixabay_clips, _target_shots - len(clips), dl_dir, "pixabay"))
 
     # ── Coverr clips ───────────────────────────────────────────────
     if config.video.source == VideoSource.coverr and len(clips) < _target_shots:
-        cov_query = " ".join(config.topic.split()[:4])
-        cov_urls = await fetch_coverr_clips(cov_query, _target_shots - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
-        clips.extend(await _download_clips(cov_urls, dl_dir, "coverr"))
+        clips.extend(await _fetch_bank_multi(fetch_coverr_clips, _target_shots - len(clips), dl_dir, "coverr"))
 
     # ── Máxima variedad: todos los bancos de stock disponibles ─────
     if config.video.source == VideoSource.stock:
-        q = " ".join(config.topic.split()[:4])
         dl_dir = Path("projects") / project_id / "video" / "downloads"
-        pexels_urls = await fetch_pexels_clips(q, _target_shots)
-        clips.extend(await _download_clips(pexels_urls, dl_dir, "pexels"))
-        pix_urls = await fetch_pixabay_clips(q, _target_shots)
-        clips.extend(await _download_clips(pix_urls, dl_dir, "pixabay"))
-        cov_urls = await fetch_coverr_clips(q, _target_shots)
-        clips.extend(await _download_clips(cov_urls, dl_dir, "coverr"))
+        clips.extend(await _fetch_bank_multi(fetch_pexels_clips, _target_shots, dl_dir, "pexels"))
+        clips.extend(await _fetch_bank_multi(fetch_pixabay_clips, _target_shots, dl_dir, "pixabay"))
+        clips.extend(await _fetch_bank_multi(fetch_coverr_clips, _target_shots, dl_dir, "coverr"))
 
     if not clips:
         if config.video.source == VideoSource.gdrive:
