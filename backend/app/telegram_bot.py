@@ -966,11 +966,15 @@ async def on_script_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     project_service.update_project_config(project_id, {"script": script})
 
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Regenerar audio + subtítulos", callback_data=f"regen_audio_{project_id}")],
+        [InlineKeyboardButton("🎬 Renderizar", callback_data=f"render_{project_id}")],
+    ])
     await update.message.reply_text(
-        f"✅ Guión guardado ({len(script)} caracteres)\n\n"
-        f"💡 Ahora puedes:\n"
-        f"• `/capas {project_id}` — editar capas\n"
-        f"• `/render {project_id}` — renderizar con nuevo guión",
+        f"✅ Texto guardado ({len(script)} caracteres)\n\n"
+        f"Para que el audio y los subtítulos usen el texto nuevo, "
+        f"*regenerá audio + subtítulos* (se sincronizan juntos) y luego renderizá.",
+        reply_markup=kb,
         parse_mode="Markdown",
     )
     return ConversationHandler.END
@@ -1080,9 +1084,11 @@ async def on_layer_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sub_cfg = meta.get("config", {}).get("subtitles", {})
         size = sub_cfg.get("font_size", 72)
         pos = {"top": "arriba", "center": "centro", "bottom": "abajo"}.get(sub_cfg.get("position", "bottom"), "abajo")
-        desc += f"\nTamaño: {size}px · Posición: {pos}"
-        keyboard.append([InlineKeyboardButton("📐 Ajustar tamaño y posición", callback_data=f"substyle_{project_id}")])
-        keyboard.append([InlineKeyboardButton("✏️ Regenerar subtítulos", callback_data=f"regen_subs_{project_id}")])
+        off = float(sub_cfg.get("time_offset", 0.0) or 0.0)
+        desc += f"\nTamaño: {size}px · Posición: {pos}" + (f" · Desfase: {off:+.1f}s" if off else "")
+        keyboard.append([InlineKeyboardButton("📐 Tamaño / posición / sincronía", callback_data=f"substyle_{project_id}")])
+        keyboard.append([InlineKeyboardButton("✏️ Editar texto (guion)", callback_data=f"edit_script_{project_id}")])
+        keyboard.append([InlineKeyboardButton("🔁 Regenerar subtítulos", callback_data=f"regen_subs_{project_id}")])
     else:
         keyboard.append([InlineKeyboardButton("📤 Subir archivo", callback_data=f"upload_{layer}_{project_id}")])
 
@@ -1418,6 +1424,12 @@ async def _regen_layer(bot, chat_id: int, project_id: str, layer: str, config):
     try:
         if layer == "audio":
             await layer_service.generate_audio(project_id, config)
+            # Re-sincronizar: el audio cambió (voz/velocidad) → regenerar subtítulos
+            # para que no queden a destiempo respecto de la nueva narración.
+            try:
+                await layer_service.generate_subtitles(project_id, config)
+            except Exception as sub_err:
+                log.warning(f"Re-sync de subtítulos tras audio falló: {sub_err}")
         elif layer == "video":
             await layer_service.assemble_video_layer(project_id, config)
         elif layer == "subtitles":
@@ -1459,6 +1471,8 @@ async def on_substyle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     size = sub_cfg.get("font_size", 72)
     pos = sub_cfg.get("position", "bottom")
     pos_label = {"top": "arriba", "center": "centro", "bottom": "abajo"}.get(pos, "abajo")
+    offset = float(sub_cfg.get("time_offset", 0.0) or 0.0)
+    off_label = f"{offset:+.1f}s" if offset else "0s (en sync)"
 
     kb = [
         [
@@ -1471,13 +1485,20 @@ async def on_substyle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("⏺ Centro", callback_data=f"subps_center_{project_id}"),
             InlineKeyboardButton("⬇️ Abajo", callback_data=f"subps_bottom_{project_id}"),
         ],
+        [
+            InlineKeyboardButton("⏪ Adelantar 0.3s", callback_data=f"suboff_-0.3_{project_id}"),
+            InlineKeyboardButton("⏩ Atrasar 0.3s", callback_data=f"suboff_0.3_{project_id}"),
+            InlineKeyboardButton("⟲ 0", callback_data=f"suboff_reset_{project_id}"),
+        ],
         [InlineKeyboardButton("🔄 Aplicar y re-renderizar", callback_data=f"subrender_{project_id}")],
         [InlineKeyboardButton("◀️ Volver", callback_data=f"pc_{project_id}")],
     ]
     await query.edit_message_text(
         f"📐 *Estilo de subtítulos*\n\n"
-        f"Tamaño actual: *{size}px*\nPosición: *{pos_label}*\n\n"
-        f"Elige tamaño y posición, luego *Aplicar y re-renderizar*.",
+        f"Tamaño: *{size}px*  ·  Posición: *{pos_label}*\n"
+        f"Desfase de tiempo: *{off_label}*\n\n"
+        f"Si están a destiempo, usá ⏪/⏩ hasta que sincronicen, "
+        f"luego *Aplicar y re-renderizar*.",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown",
     )
@@ -1507,6 +1528,32 @@ async def on_sub_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     project_service.update_project_config(project_id, {"subtitles": sub_cfg})
 
     # Refrescar el submenú para reflejar el cambio
+    query.data = f"substyle_{project_id}"
+    await on_substyle(update, context)
+
+
+async def on_sub_offset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """suboff_<delta|reset>_<pid>: ajusta el desfase de tiempo de los subtítulos."""
+    query = update.callback_query
+    parts = query.data.split("_")
+    value = parts[1]
+    project_id = "_".join(parts[2:])
+
+    meta = _owns(project_id, query.message.chat_id)
+    if not meta:
+        await query.answer("Proyecto no encontrado", show_alert=True)
+        return
+
+    sub_cfg = dict(meta.get("config", {}).get("subtitles", {}))
+    current = float(sub_cfg.get("time_offset", 0.0) or 0.0)
+    if value == "reset":
+        new_offset = 0.0
+    else:
+        new_offset = max(-5.0, min(5.0, round(current + float(value), 1)))
+    sub_cfg["time_offset"] = new_offset
+    await query.answer(f"Desfase: {new_offset:+.1f}s")
+
+    project_service.update_project_config(project_id, {"subtitles": sub_cfg})
     query.data = f"substyle_{project_id}"
     await on_substyle(update, context)
 
@@ -1609,6 +1656,7 @@ def build_app(token: str) -> Application:
     application.add_handler(CallbackQueryHandler(on_change_gdrive_folder, pattern="^chgdf_"))
     application.add_handler(CallbackQueryHandler(on_substyle, pattern="^substyle_"))
     application.add_handler(CallbackQueryHandler(on_sub_set, pattern="^(subsz|subps)_"))
+    application.add_handler(CallbackQueryHandler(on_sub_offset, pattern="^suboff_"))
     application.add_handler(CallbackQueryHandler(on_subrender, pattern="^subrender_"))
     application.add_handler(CallbackQueryHandler(on_setvoice, pattern="^setvoice_"))
     application.add_handler(CallbackQueryHandler(on_back_capas, pattern="^back_capas_"))

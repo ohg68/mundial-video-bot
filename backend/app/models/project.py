@@ -79,6 +79,8 @@ class SubtitleLayerConfig(BaseModel):
     outline: bool = True
     position: Literal["top", "center", "bottom"] = "bottom"
     custom_srt: Optional[str] = None
+    # Desfase de tiempo en segundos: + atrasa los subtítulos, - los adelanta.
+    time_offset: float = 0.0
 
 class OverlayLayerConfig(BaseModel):
     logo_file: Optional[str] = None

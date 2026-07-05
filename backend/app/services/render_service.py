@@ -76,8 +76,20 @@ def _escape_srt_path(p: Path) -> str:
     return s
 
 
+def _fmt_ass_time(sec: float) -> str:
+    """Segundos → 'H:MM:SS.cc' (formato de tiempo ASS), sin negativos."""
+    sec = max(0.0, sec)
+    h = int(sec // 3600); sec -= h * 3600
+    m = int(sec // 60); sec -= m * 60
+    s = int(sec)
+    cs = int(round((sec - s) * 100))
+    if cs == 100:
+        s += 1; cs = 0
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
 def _parse_srt(srt_text: str):
-    """Parsea un SRT en bloques (start, end, text). Tiempos a 'H:MM:SS.cc' (ASS)."""
+    """Parsea un SRT en bloques (start_sec, end_sec, text) con tiempos en segundos."""
     import re
     blocks = []
     pattern = re.compile(
@@ -89,8 +101,8 @@ def _parse_srt(srt_text: str):
         if not m:
             continue
         h1, m1, s1, ms1, h2, m2, s2, ms2 = m.groups()
-        start = f"{int(h1)}:{m1}:{s1}.{ms1[:2]}"
-        end = f"{int(h2)}:{m2}:{s2}.{ms2[:2]}"
+        start = int(h1) * 3600 + int(m1) * 60 + int(s1) + int(ms1) / 1000
+        end = int(h2) * 3600 + int(m2) * 60 + int(s2) + int(ms2) / 1000
         lines = chunk.split("\n")
         # texto = todo lo que sigue a la línea del timestamp
         ts_idx = next((i for i, ln in enumerate(lines) if "-->" in ln), 0)
@@ -106,6 +118,7 @@ def _srt_to_ass(srt_path: Path, ass_path: Path, w: int, h: int, sub_cfg: dict):
     font = sub_cfg.get("font", "Arial")
     font_size = int(sub_cfg.get("font_size", 72))
     position = sub_cfg.get("position", "bottom")
+    offset = float(sub_cfg.get("time_offset", 0.0) or 0.0)  # + atrasa, - adelanta
 
     # Alignment ASS: 2=abajo-centro, 5=medio-centro, 8=arriba-centro
     alignment = {"bottom": 2, "center": 5, "top": 8}.get(position, 2)
@@ -131,7 +144,7 @@ Style: Default,{font},{font_size},&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,1
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = "\n".join(
-        f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}"
+        f"Dialogue: 0,{_fmt_ass_time(start + offset)},{_fmt_ass_time(end + offset)},Default,,0,0,0,,{text}"
         for start, end, text in blocks
     )
     ass_path.write_text(header + events, encoding="utf-8")
