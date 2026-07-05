@@ -182,8 +182,9 @@ async def download_photos(photos: list, dest_dir: Path) -> list[Path]:
             return dest
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+                # User-Agent descriptivo: Wikimedia throttlea (429) los genéricos.
                 resp = await client.get(url, headers={
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+                    "User-Agent": "LayerCut/1.0 (video generator; https://layercut-production.up.railway.app)"
                 })
             if resp.status_code == 200 and len(resp.content) > 2000:
                 dest.write_bytes(resp.content)
