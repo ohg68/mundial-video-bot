@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 (WAITING_TITLE, WAITING_TOPIC, WAITING_SOURCE,
  WAITING_LAYER_ACTION, WAITING_AUDIO_VOICE, WAITING_AUDIO_SPEED,
  WAITING_VIDEO_SOURCE, WAITING_FILE_UPLOAD,
- WAITING_SCRIPT_EDIT) = range(9)
+ WAITING_SCRIPT_EDIT, WAITING_GDRIVE_FOLDER) = range(10)
 
 # ── Seguridad ─────────────────────────────────────────────────────────────────
 
@@ -90,12 +90,14 @@ def _owns(project_id: str, chat_id: int):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool = False) -> ProjectConfig:
+def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool = False,
+                  gdrive_folder_id: str = None) -> ProjectConfig:
     return ProjectConfig(
         title=title,
         topic=topic,
         aspect="9:16",
-        video=VideoLayerConfig(source=VideoSource(source), clip_duration=4, ab_split=ab_split),
+        video=VideoLayerConfig(source=VideoSource(source), clip_duration=4, ab_split=ab_split,
+                               gdrive_folder_id=gdrive_folder_id),
         audio=AudioLayerConfig(speed=1.1, volume=0.9),
         music=MusicLayerConfig(volume=0.25, fade_in=2, fade_out=3),
         subtitles=SubtitleLayerConfig(font_size=48, color="white", outline=True, position="bottom"),
@@ -127,12 +129,13 @@ async def _send_video(bot, chat_id: int, path: Path, caption: str = ""):
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
-async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str, ab_split: bool = False):
+async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str, ab_split: bool = False,
+                        gdrive_folder_id: str = None):
     """Genera el video completo y lo entrega por Telegram."""
     project_id = None
     try:
         # 1. Crear proyecto (owner = chat_id de Telegram para aislamiento por usuario)
-        config = _build_config(title, topic, source, ab_split=ab_split)
+        config = _build_config(title, topic, source, ab_split=ab_split, gdrive_folder_id=gdrive_folder_id)
         meta = project_service.create_project(config, owner_id=chat_id)
         project_id = meta["id"]
 
@@ -525,6 +528,12 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔀 Mix Fotos + Video", callback_data="src_mixed_photos")],
         [InlineKeyboardButton("🎯 A/B guiado (imágenes siguen el guion)", callback_data="src_ab")],
     ]
+    # Fuentes que solo aparecen si están configuradas (evita botones muertos)
+    from app.services import gdrive_service
+    if gdrive_service.is_configured():
+        keyboard.append([InlineKeyboardButton("📁 Mis videos de Google Drive", callback_data="src_gdrive")])
+    if os.getenv("PIXABAY_API_KEY"):
+        keyboard.append([InlineKeyboardButton("🎞️ Video Clips (Pixabay)", callback_data="src_pixabay")])
     await update.message.reply_text(
         f"✅ Tema: *{context.user_data['topic']}*\n\n"
         "¿Qué tipo de *fuente de video* usamos?",
@@ -537,6 +546,23 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
+
+    # Google Drive: primero elegir la carpeta (todavía no arranca el pipeline)
+    if query.data == "src_gdrive":
+        from app.services import gdrive_service
+        folders = gdrive_service.list_folders()
+        if not folders:
+            await query.edit_message_text(
+                "📁 No encontré carpetas compartidas con la cuenta de servicio.\n"
+                "Compartí una carpeta de Drive con ella y volvé a intentar.")
+            return ConversationHandler.END
+        rows = [[InlineKeyboardButton(f"📁 {f['name'][:40]}", callback_data=f"gdf_{f['id']}")]
+                for f in folders[:12]]
+        await query.edit_message_text(
+            "📁 *Elegí la carpeta de Google Drive:*",
+            reply_markup=InlineKeyboardMarkup(rows), parse_mode="Markdown")
+        return WAITING_GDRIVE_FOLDER
 
     # ab_split=True hace que las imágenes sigan el guion (2 visuales por escena).
     src_map = {
@@ -544,12 +570,12 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "src_pexels": ("pexels", "🎬 Video Clips Pexels", False),
         "src_mixed_photos": ("mixed_photos", "🔀 Mix Fotos + Video", False),
         "src_ab": ("photos", "🎯 A/B guiado por guion", True),
+        "src_pixabay": ("pixabay", "🎞️ Video Clips Pixabay", False),
     }
     source, label, ab_split = src_map.get(query.data, ("pexels", "🎬 Video Clips Pexels", False))
 
     title = context.user_data.get("title", "Video Mundial 2026")
     topic = context.user_data.get("topic", "Mundial 2026")
-    chat_id = query.message.chat_id
 
     await query.edit_message_text(
         f"✅ Fuente: *{label}*\n\n"
@@ -560,6 +586,28 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source, ab_split=ab_split))
+    return ConversationHandler.END
+
+
+async def on_gdrive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Se eligió una carpeta de Drive (gdf_<id>): arranca el pipeline con esa carpeta."""
+    query = update.callback_query
+    await query.answer()
+    folder_id = query.data.split("_", 1)[1]
+    chat_id = query.message.chat_id
+    title = context.user_data.get("title", "Video")
+    topic = context.user_data.get("topic", "")
+
+    await query.edit_message_text(
+        f"✅ Fuente: *📁 Google Drive*\n\n"
+        f"🚀 Iniciando pipeline...\n"
+        f"Título: _{title}_\n"
+        f"Tema: _{topic}_",
+        parse_mode="Markdown",
+    )
+
+    asyncio.create_task(_run_pipeline(
+        context.application.bot, chat_id, title, topic, "gdrive", gdrive_folder_id=folder_id))
     return ConversationHandler.END
 
 
@@ -1442,6 +1490,7 @@ def build_app(token: str) -> Application:
             WAITING_TITLE: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_titulo)],
             WAITING_TOPIC: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_tema)],
             WAITING_SOURCE: [CallbackQueryHandler(on_fuente, pattern="^src_")],
+            WAITING_GDRIVE_FOLDER: [CallbackQueryHandler(on_gdrive_folder, pattern="^gdf_")],
         },
         fallbacks=[CommandHandler("cancelar", cmd_cancelar)],
     )

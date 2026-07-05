@@ -583,6 +583,33 @@ async def fetch_pexels_clips(query: str, count: int = 8) -> list:
         return []
 
 
+async def fetch_pixabay_clips(query: str, count: int = 8) -> list:
+    """Clips de video de Pixabay (stock gratis). Requiere PIXABAY_API_KEY."""
+    key = os.getenv("PIXABAY_API_KEY")
+    if not key:
+        log.warning("PIXABAY_API_KEY no configurada — Pixabay deshabilitado")
+        return []
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://pixabay.com/api/videos/",
+                params={"key": key, "q": query, "per_page": max(count, 3), "safesearch": "true"},
+                timeout=15,
+            )
+        data = resp.json()
+        urls = []
+        for hit in data.get("hits", []):
+            vids = hit.get("videos", {})
+            # Preferir medium/small para no bajar archivos enormes
+            v = vids.get("medium") or vids.get("small") or vids.get("tiny") or {}
+            if v.get("url"):
+                urls.append(v["url"])
+        return urls[:count]
+    except Exception as e:
+        log.warning(f"Pixabay clips error: {e}")
+        return []
+
+
 async def _download_clips(urls: list, dest_dir: Path, prefix: str) -> list:
     """Descarga clips en paralelo, validando status_code. Devuelve paths válidos."""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -738,6 +765,13 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         pexels_urls = await fetch_pexels_clips(pexels_query, 8 - len(clips))
         dl_dir = Path("projects") / project_id / "video" / "downloads"
         clips.extend(await _download_clips(pexels_urls, dl_dir, "pexels"))
+
+    # ── Pixabay clips ──────────────────────────────────────────────
+    if config.video.source == VideoSource.pixabay and len(clips) < 8:
+        pix_query = " ".join(config.topic.split()[:4])
+        pix_urls = await fetch_pixabay_clips(pix_query, 8 - len(clips))
+        dl_dir = Path("projects") / project_id / "video" / "downloads"
+        clips.extend(await _download_clips(pix_urls, dl_dir, "pixabay"))
 
     if not clips:
         if config.video.source == VideoSource.gdrive:
