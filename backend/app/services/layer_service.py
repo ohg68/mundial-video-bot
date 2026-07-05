@@ -596,6 +596,9 @@ async def fetch_pixabay_clips(query: str, count: int = 8) -> list:
                 params={"key": key, "q": query, "per_page": max(count, 3), "safesearch": "true"},
                 timeout=15,
             )
+        if resp.status_code != 200:
+            log.warning(f"Pixabay {resp.status_code}: {resp.text[:150]}")
+            return []
         data = resp.json()
         urls = []
         for hit in data.get("hits", []):
@@ -623,6 +626,9 @@ async def fetch_coverr_clips(query: str, count: int = 8) -> list:
                 params={"query": query, "page_size": max(count, 3), "urls": "true", "api_key": key},
                 timeout=15,
             )
+        if resp.status_code != 200:
+            log.warning(f"Coverr {resp.status_code}: {resp.text[:150]}")
+            return []
         data = resp.json()
         urls = []
         for hit in data.get("hits", []):
