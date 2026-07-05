@@ -679,8 +679,10 @@ async def _apply_cut_cadence(source_clips: list, total_dur: float, shot_dur: flo
         out = dest_dir / f"shot_{i:03d}.mp4"
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(src), "-t", f"{shot_dur:.2f}",
-            "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
-            "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-an",
+            # fps=30 fuerza framerate constante: los clips fuente vienen a fps distintos y
+            # sin esto el concat rompe los timestamps (duración inflada, playback raro).
+            "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30",
+            "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-r", "30", "-an",
             str(out),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
@@ -845,8 +847,10 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
         "-i", str(list_file),
-        "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
-        "-c:v", "libx264", "-crf", "23",
+        # fps=30 CFR: clips de fuentes distintas traen fps variados; sin normalizar,
+        # el concat produce duración inflada y reproducción a saltos.
+        "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30",
+        "-c:v", "libx264", "-crf", "23", "-r", "30",
         "-an",
         str(output_path),
         stdout=asyncio.subprocess.PIPE,
