@@ -4,3 +4,5 @@ backend/projects/
 frontend/package-lock.json
 frontend/dist/
 .claude/
+__pycache__/
+.zeroeval/
