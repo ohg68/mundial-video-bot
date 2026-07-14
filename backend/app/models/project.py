@@ -101,6 +101,8 @@ class ProjectConfig(BaseModel):
     match_date: Optional[str] = None
     aspect: Literal["9:16", "16:9"] = "9:16"
     language: str = "es"
+    # Duración objetivo del video en segundos (60 o 90). Afecta el guion generado.
+    duration: int = 90
     script: Optional[str] = None
     llm_provider: LLMProvider = LLMProvider.deepseek
     script_template: ScriptTemplate = ScriptTemplate.free

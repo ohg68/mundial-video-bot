@@ -36,7 +36,8 @@ log = logging.getLogger(__name__)
 (WAITING_TITLE, WAITING_TOPIC, WAITING_SOURCE,
  WAITING_LAYER_ACTION, WAITING_AUDIO_VOICE, WAITING_AUDIO_SPEED,
  WAITING_VIDEO_SOURCE, WAITING_FILE_UPLOAD,
- WAITING_SCRIPT_EDIT, WAITING_GDRIVE_FOLDER, WAITING_LANG) = range(11)
+ WAITING_SCRIPT_EDIT, WAITING_GDRIVE_FOLDER, WAITING_LANG,
+ WAITING_DURATION) = range(12)
 
 # ── Seguridad ─────────────────────────────────────────────────────────────────
 
@@ -91,7 +92,8 @@ def _owns(project_id: str, chat_id: int):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool = False,
-                  gdrive_folder_id: str = None, language: str = "es") -> ProjectConfig:
+                  gdrive_folder_id: str = None, language: str = "es",
+                  duration: int = 90) -> ProjectConfig:
     from app.services.layer_service import LANG_INFO
     voice_name = LANG_INFO.get(language, LANG_INFO["es"])[1]
     return ProjectConfig(
@@ -99,6 +101,7 @@ def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool
         topic=topic,
         aspect="9:16",
         language=language,
+        duration=duration,
         video=VideoLayerConfig(source=VideoSource(source), clip_duration=4, ab_split=ab_split,
                                gdrive_folder_id=gdrive_folder_id),
         audio=AudioLayerConfig(speed=1.1, volume=0.9, voice_name=voice_name),
@@ -165,13 +168,14 @@ async def _send_video(bot, chat_id: int, path: Path, caption: str = ""):
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str, ab_split: bool = False,
-                        gdrive_folder_id: str = None, language: str = "es"):
+                        gdrive_folder_id: str = None, language: str = "es", duration: int = 90):
     """Genera el video completo y lo entrega por Telegram."""
     project_id = None
     try:
         # 1. Crear proyecto (owner = chat_id de Telegram para aislamiento por usuario)
         config = _build_config(title, topic, source, ab_split=ab_split,
-                               gdrive_folder_id=gdrive_folder_id, language=language)
+                               gdrive_folder_id=gdrive_folder_id, language=language,
+                               duration=duration)
         meta = project_service.create_project(config, owner_id=chat_id)
         project_id = meta["id"]
 
@@ -593,14 +597,37 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Idioma elegido (lang_<code>): guarda y pasa a elegir la fuente de video."""
+    """Idioma elegido (lang_<code>): guarda y pasa a elegir la duración."""
     query = update.callback_query
     await query.answer()
     code = query.data.split("_", 1)[1]
     context.user_data["language"] = code
     label = next((l for l, c in _LANGS if c == code), code)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ 60 segundos", callback_data="dur_60"),
+         InlineKeyboardButton("🎬 90 segundos", callback_data="dur_90")],
+    ])
     await query.edit_message_text(
-        f"✅ Idioma: *{label}*\n\n¿Qué tipo de *fuente de video* usamos?",
+        f"✅ Idioma: *{label}*\n\n⏱️ ¿De qué *duración* querés el video?",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+    return WAITING_DURATION
+
+
+async def on_duracion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Duración elegida (dur_60 | dur_90): guarda y pasa a elegir la fuente de video."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        duration = int(query.data.split("_", 1)[1])
+    except (IndexError, ValueError):
+        duration = 90
+    if duration not in (60, 90):
+        duration = 90
+    context.user_data["duration"] = duration
+    await query.edit_message_text(
+        f"✅ Duración: *{duration} segundos*\n\n¿Qué tipo de *fuente de video* usamos?",
         reply_markup=_source_keyboard(),
         parse_mode="Markdown",
     )
@@ -653,8 +680,9 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     lang = context.user_data.get("language", "es")
+    duration = context.user_data.get("duration", 90)
     asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source,
-                                      ab_split=ab_split, language=lang))
+                                      ab_split=ab_split, language=lang, duration=duration))
     return ConversationHandler.END
 
 
@@ -676,9 +704,10 @@ async def on_gdrive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     lang = context.user_data.get("language", "es")
+    duration = context.user_data.get("duration", 90)
     asyncio.create_task(_run_pipeline(
         context.application.bot, chat_id, title, topic, "gdrive",
-        gdrive_folder_id=folder_id, language=lang))
+        gdrive_folder_id=folder_id, language=lang, duration=duration))
     return ConversationHandler.END
 
 
@@ -1714,6 +1743,7 @@ def build_app(token: str) -> Application:
             WAITING_TITLE: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_titulo)],
             WAITING_TOPIC: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_tema)],
             WAITING_LANG: [CallbackQueryHandler(on_lang, pattern="^lang_")],
+            WAITING_DURATION: [CallbackQueryHandler(on_duracion, pattern="^dur_")],
             WAITING_SOURCE: [CallbackQueryHandler(on_fuente, pattern="^src_")],
             WAITING_GDRIVE_FOLDER: [CallbackQueryHandler(on_gdrive_folder, pattern="^gdf_")],
         },

@@ -79,8 +79,11 @@ async def generate_script(project_id: str, config: ProjectConfig) -> str:
         extra += f"\nFecha: {config.match_date}"
 
     lang_name = LANG_INFO.get(getattr(config, "language", "es"), LANG_INFO["es"])[0]
+    # Duración objetivo (60 o 90 s). ~2.5 palabras/seg leídas en voz alta.
+    duration = int(getattr(config, "duration", 90) or 90)
+    approx_words = int(duration * 2.5)
     prompt = f"""Eres un guionista de videos cortos para redes sociales (YouTube Shorts, TikTok, Reels).
-Genera un guion EN {lang_name} para un video corto de ~90 segundos sobre el siguiente tema.
+Genera un guion EN {lang_name} para un video corto de ~{duration} segundos sobre el siguiente tema.
 El guion completo debe estar escrito en {lang_name}.
 
 Título: {config.title}
@@ -94,7 +97,7 @@ El guion debe:
 - Tener un gancho potente en los primeros 5 segundos
 - Ser informativo, claro y atractivo
 - Terminar con una llamada a la acción (suscríbete, comenta)
-- Durar aproximadamente 90 segundos al leerlo en voz alta
+- Durar aproximadamente {duration} segundos al leerlo en voz alta (~{approx_words} palabras)
 - Contener solo el texto que leerá el narrador, sin indicaciones de escena ni acotaciones
 
 Responde SOLO con el guion, sin introducción ni explicación."""
