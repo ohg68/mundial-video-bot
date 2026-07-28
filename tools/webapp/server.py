@@ -7,8 +7,10 @@ plataformas (vía yt-dlp) a una carpeta local, para usarlos como fuente
 usuario, no en Railway.
 """
 import json
+import mimetypes
 import subprocess
 import threading
+import urllib.parse
 import uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,14 +47,19 @@ INDEX_HTML = """<!doctype html>
 <title>LayerCut Downloader</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: -apple-system, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; background: #ffffff; }
   h1 { font-size: 20px; }
   input[type=text] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; box-sizing: border-box; }
   button { margin-top: 10px; padding: 10px 18px; border: none; border-radius: 8px; background: #0C447C; color: white; font-size: 14px; cursor: pointer; }
   button:disabled { background: #aaa; }
   #status { margin-top: 16px; font-size: 13px; color: #555; }
   #files { margin-top: 24px; font-size: 13px; }
-  #files div { padding: 6px 0; border-bottom: 1px solid #eee; }
+  #files .row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #eee; }
+  #files .row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #files button { margin: 0; padding: 4px 10px; font-size: 12px; }
+  #player { margin-top: 16px; display: none; }
+  #player video { width: 100%; border-radius: 8px; background: #000; }
 </style></head>
 <body>
   <h1>🎬 LayerCut Downloader</h1>
@@ -60,6 +67,7 @@ INDEX_HTML = """<!doctype html>
   <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=...">
   <button id="go" onclick="startDownload()">Descargar</button>
   <div id="status"></div>
+  <div id="player"><video id="video" controls></video></div>
   <div id="files"></div>
 <script>
 async function refreshFiles() {
@@ -67,8 +75,18 @@ async function refreshFiles() {
   const data = await r.json();
   const el = document.getElementById('files');
   el.innerHTML = data.files.length
-    ? '<b>Descargados:</b>' + data.files.map(f => `<div>📄 ${f}</div>`).join('')
+    ? '<b>Descargados:</b>' + data.files.map(f =>
+        `<div class="row"><span>📄 ${f}</span><button onclick="play('${f.replace(/'/g, "\\'")}')">▶ Ver</button></div>`
+      ).join('')
     : '';
+}
+function play(name) {
+  const player = document.getElementById('player');
+  const video = document.getElementById('video');
+  video.src = '/files/' + encodeURIComponent(name);
+  player.style.display = 'block';
+  video.play().catch(() => {});
+  player.scrollIntoView({behavior: 'smooth'});
 }
 async function poll(jobId) {
   const r = await fetch('/api/status/' + jobId);
@@ -124,6 +142,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/status/"):
             job_id = self.path.rsplit("/", 1)[-1]
             return self._json(JOBS.get(job_id, {"status": "error", "error": "job no encontrado"}))
+        if self.path.startswith("/files/"):
+            return self._serve_file(self.path[len("/files/"):])
         if self.path == "/" or self.path == "/index.html":
             body = INDEX_HTML.encode()
             self.send_response(200)
@@ -134,6 +154,50 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_response(404)
         self.end_headers()
+
+    def _serve_file(self, raw_name: str):
+        name = urllib.parse.unquote(raw_name)
+        path = (DOWNLOAD_DIR / name).resolve()
+        # Path traversal guard: el archivo resuelto debe seguir dentro de DOWNLOAD_DIR.
+        if DOWNLOAD_DIR.resolve() not in path.parents or not path.is_file():
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        size = path.stat().st_size
+        ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        range_header = self.headers.get("Range")
+
+        start, end = 0, size - 1
+        status = 200
+        if range_header and range_header.startswith("bytes="):
+            status = 206
+            rng = range_header[6:].split("-")
+            start = int(rng[0]) if rng[0] else 0
+            end = int(rng[1]) if len(rng) > 1 and rng[1] else size - 1
+            end = min(end, size - 1)
+
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                remaining -= len(chunk)
 
     def do_POST(self):
         if self.path == "/api/download":
