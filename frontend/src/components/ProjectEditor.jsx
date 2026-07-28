@@ -105,13 +105,13 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
   return (
     <div className="p-4 md:p-7 max-w-[760px]">
       {/* Header */}
-      <div className="flex items-start justify-between mb-5 gap-3">
+      <div className="flex items-start justify-between mb-4 gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <button onClick={onMenuOpen}
               className="md:hidden bg-transparent border-none cursor-pointer text-lg p-0 text-gray-500">☰</button>
-            <h1 className="text-lg md:text-xl font-medium m-0 truncate">{project.title}</h1>
-            {connected && <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" title="WebSocket conectado" />}
+            <h1 className="text-lg md:text-xl font-semibold tracking-tight m-0 truncate">{project.title}</h1>
+            {connected && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="Conectado en vivo" />}
           </div>
           <div className="text-[13px] text-gray-400 flex gap-3 mt-1 flex-wrap">
             {project.match && <span>⚽ {project.match}</span>}
@@ -119,17 +119,25 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
             <span>{project.config?.aspect || "9:16"}</span>
           </div>
         </div>
-        <div className="flex gap-2 items-center shrink-0 flex-wrap justify-end">
-          <button onClick={() => { setAssistantReviewMode(false); setShowAssistant(true) }} className="btn-outline bg-blue-50 border-blue-300 text-[#0C447C] font-medium">🤖 Asistente IA</button>
-          <button onClick={() => setShowScript(true)} className="btn-outline">✏️ Guión</button>
-          <button onClick={() => setShowEditing(true)} className="btn-outline">🎬 Edición</button>
-          <button onClick={() => setShowMotion(true)} className="btn-outline">✨ Intro/Outro</button>
-          <button onClick={() => setShowHistory(true)} className="btn-outline">📂 Historial</button>
-          <button onClick={() => setShowPublish(true)} className="btn-outline">📤 Publicar</button>
-          <button onClick={handleClearRenders} className="btn-outline text-red-500 border-red-200 hover:bg-red-50">
-            🗑 Renders
-          </button>
-        </div>
+        <button
+          onClick={() => { setAssistantReviewMode(false); setShowAssistant(true) }}
+          className="btn-primary shrink-0 whitespace-nowrap"
+        >
+          🤖 Asistente IA
+        </button>
+      </div>
+
+      {/* Toolbar secundario */}
+      <div className="flex gap-1.5 items-center flex-wrap mb-4 pb-4 border-b border-gray-100">
+        <button onClick={() => setShowScript(true)} className="btn-action">✏️ Guión</button>
+        <button onClick={() => setShowEditing(true)} className="btn-action">🎬 Edición</button>
+        <button onClick={() => setShowMotion(true)} className="btn-action">✨ Intro/Outro</button>
+        <span className="w-px h-4 bg-gray-200 mx-1" />
+        <button onClick={() => setShowHistory(true)} className="btn-action">📂 Historial</button>
+        <button onClick={() => setShowPublish(true)} className="btn-action">📤 Publicar</button>
+        <button onClick={handleClearRenders} className="btn-action text-red-500 hover:bg-red-50 hover:border-red-200">
+          🗑 Renders
+        </button>
       </div>
 
       {/* Render buttons */}
@@ -140,17 +148,17 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
           className={`px-3.5 py-1.5 rounded-lg border text-[13px] cursor-pointer transition-colors
             ${readyCount >= 2
               ? "bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100"
-              : "bg-gray-200 text-gray-500 border-gray-200 cursor-not-allowed"}`}
+              : "bg-gray-100 text-gray-400 border-gray-100 cursor-not-allowed"}`}
         >
           {rendering ? "⏳" : "⚡"} Preview 540p
         </button>
         <button
           onClick={() => handleRender("full")}
           disabled={rendering || readyCount < 2}
-          className={`px-3.5 py-1.5 rounded-lg border text-[13px] cursor-pointer transition-colors
+          className={`px-4 py-1.5 rounded-lg border-none text-[13px] font-medium cursor-pointer transition-colors shadow-sm
             ${readyCount >= 2
-              ? "bg-[#185FA5] text-blue-100 border-[#185FA5] hover:bg-[#0C447C]"
-              : "bg-gray-200 text-gray-500 border-gray-200 cursor-not-allowed"}`}
+              ? "bg-[#185FA5] text-white hover:bg-[#0C447C]"
+              : "bg-gray-100 text-gray-400 cursor-not-allowed"}`}
         >
           {rendering ? "⏳ Renderizando..." : "▶ Render full"}
         </button>

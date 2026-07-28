@@ -1,13 +1,36 @@
 @import "tailwindcss";
 
+:root {
+  --brand: #0C447C;
+  --brand-strong: #185FA5;
+  --brand-soft: #E6F1FB;
+  --surface: #FAFBFC;
+  --surface-raised: #FFFFFF;
+  --border-soft: #E8EAED;
+}
+
+body {
+  background: var(--surface);
+}
+
 @layer components {
   .btn-outline {
-    @apply px-3.5 py-1.5 rounded-lg border border-gray-300 bg-transparent cursor-pointer text-[13px] hover:bg-gray-50 transition-colors;
+    @apply px-3.5 py-1.5 rounded-lg border border-gray-200 bg-white cursor-pointer text-[13px]
+           text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors shadow-sm;
   }
   .btn-action {
-    @apply px-3 py-1.5 rounded-lg border border-gray-300 bg-transparent cursor-pointer text-xs hover:bg-gray-50 transition-colors;
+    @apply px-3 py-1.5 rounded-lg border border-gray-200 bg-white cursor-pointer text-xs
+           text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors;
+  }
+  .btn-primary {
+    @apply px-3.5 py-1.5 rounded-lg border-none bg-[#185FA5] text-white cursor-pointer text-[13px]
+           font-medium hover:bg-[#0C447C] transition-colors shadow-sm;
   }
   .input-field {
-    @apply w-full px-2.5 py-[7px] rounded-lg border border-gray-300 text-[13px] bg-white text-gray-900 focus:outline-none focus:border-[#0C447C] transition-colors;
+    @apply w-full px-3 py-2 rounded-lg border border-gray-200 text-[13px] bg-white text-gray-900
+           focus:outline-none focus:ring-2 focus:ring-[#0C447C]/15 focus:border-[#0C447C] transition-all;
+  }
+  .card-surface {
+    @apply bg-white border border-gray-100 rounded-2xl shadow-[0_1px_2px_rgba(16,24,40,0.04)];
   }
 }

@@ -3,12 +3,11 @@ import ProjectList from "./components/ProjectList"
 import ProjectEditor from "./components/ProjectEditor"
 import NewProjectModal from "./components/NewProjectModal"
 import BottomNav from "./components/BottomNav"
-import LoginForm from "./components/LoginForm"
-import useAuth from "./hooks/useAuth"
 import { apiJson } from "./api"
 
+// Uso personal: sin login. Si en el futuro se vuelve multiusuario, se
+// puede reactivar useAuth + LoginForm (siguen en el repo, sin usarse).
 export default function App() {
-  const { user, loading: authLoading, login, register, logout } = useAuth()
   const [projects, setProjects] = useState([])
   const [selected, setSelected] = useState(null)
   const [showNew, setShowNew] = useState(false)
@@ -24,25 +23,7 @@ export default function App() {
     if (Array.isArray(data)) setProjects(data)
   }
 
-  useEffect(() => {
-    if (user) fetchProjects()
-  }, [user, categoryFilter])
-
-  const handleAuth = async (mode, username, password) => {
-    return mode === "login" ? login(username, password) : register(username, password)
-  }
-
-  if (authLoading) {
-    return (
-      <div className="flex items-center justify-center h-[100dvh] bg-gray-50 text-gray-400">
-        Cargando...
-      </div>
-    )
-  }
-
-  if (!user) {
-    return <LoginForm onAuth={handleAuth} />
-  }
+  useEffect(() => { fetchProjects() }, [categoryFilter])
 
   const handleCreated = (project) => {
     setProjects(prev => [project, ...prev])
@@ -94,8 +75,6 @@ export default function App() {
           onRefresh={fetchProjects}
           categoryFilter={categoryFilter}
           onCategoryFilter={setCategoryFilter}
-          user={user}
-          onLogout={logout}
         />
       </aside>
 
@@ -129,13 +108,15 @@ export default function App() {
 
 function EmptyState({ onNew }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-4 text-gray-400">
-      <div className="text-5xl">⚽</div>
-      <p className="text-base">Selecciona un proyecto o crea uno nuevo</p>
-      <button
-        onClick={onNew}
-        className="px-5 py-2 rounded-lg border border-gray-300 bg-transparent cursor-pointer text-sm text-gray-600 hover:bg-gray-100 transition-colors"
-      >
+    <div className="flex flex-col items-center justify-center h-full gap-5 text-center px-6">
+      <div className="w-16 h-16 rounded-2xl bg-blue-50 flex items-center justify-center text-3xl">
+        🎬
+      </div>
+      <div>
+        <p className="text-base font-medium text-gray-700 m-0">Ningún proyecto abierto</p>
+        <p className="text-sm text-gray-400 mt-1 m-0">Elegí uno de la lista o empezá uno nuevo</p>
+      </div>
+      <button onClick={onNew} className="btn-primary px-6 py-2.5 text-sm">
         + Nuevo vídeo
       </button>
     </div>
