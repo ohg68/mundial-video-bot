@@ -239,6 +239,34 @@ async def trim_asset(child_id: str, parent_id: str, start: float, end: float):
         log.warning(f"Subida a Cloudinary del recorte {child_id} falló (se reintenta on-demand): {e}")
 
 
+async def add_to_project(asset_id: str, project_id: str) -> Path:
+    """Copia el asset a projects/{project_id}/video/user_clips/ — ese
+    directorio ya tiene prioridad máxima en assemble_video_layer, así que
+    esta es toda la integración necesaria con el pipeline de render (cero
+    cambios en layer_service.py)."""
+    asset = get_asset(asset_id)
+    if not asset:
+        raise ValueError("Asset no encontrado")
+    if asset["status"] != "ready":
+        raise ValueError("El asset todavía no está listo")
+
+    src = Path(asset["file_path"]) if asset.get("file_path") else None
+    if not src or not src.exists():
+        if asset.get("cloud_video_public_id"):
+            from app.services import cloud_storage
+            dest_local = _video_path(asset_id)
+            if await cloud_storage.restore_library_asset(asset_id, asset["cloud_video_public_id"], dest_local):
+                src = dest_local
+        if not src or not src.exists():
+            raise FileNotFoundError("El archivo no está disponible localmente ni en la nube")
+
+    dest_dir = Path("projects") / project_id / "video" / "user_clips"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{asset_id}{src.suffix}"
+    shutil.copy2(src, dest)
+    return dest
+
+
 def get_asset(asset_id: str) -> dict | None:
     db = SessionLocal()
     try:

@@ -1,5 +1,6 @@
 import { useState, useRef } from "react"
 import ClipPicker from "./ClipPicker"
+import MediaLibrary from "./MediaLibrary"
 
 const STATUS_LABEL = {
   empty: "Sin configurar",
@@ -39,6 +40,7 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
     : null
   )
   const [showClipPicker, setShowClipPicker] = useState(false)
+  const [showMediaLibrary, setShowMediaLibrary] = useState(false)
   const [previewingVoice, setPreviewingVoice] = useState(false)
   const [previewAudio, setPreviewAudio] = useState(null)
   const [removingBg, setRemovingBg] = useState(false)
@@ -194,6 +196,11 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
                 🔍 Buscar clips
               </button>
             )}
+            {layer.key === "video" && (
+              <button onClick={() => setShowMediaLibrary(true)} className="btn-action">
+                📚 Biblioteca
+              </button>
+            )}
             {status === "ready" && (
               <button onClick={handleDownload} className="btn-action">
                 ⬇ Descargar capa
@@ -331,6 +338,15 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
           projectId={projectId}
           onClose={() => setShowClipPicker(false)}
           onClipsSelected={(clips) => { onUpdate() }}
+        />
+      )}
+
+      {showMediaLibrary && (
+        <MediaLibrary
+          mode="picker"
+          projectId={projectId}
+          onClose={() => setShowMediaLibrary(false)}
+          onAdded={() => { onUpdate(); setShowMediaLibrary(false) }}
         />
       )}
     </div>

@@ -85,6 +85,21 @@ async def trim_media(asset_id: str, background_tasks: BackgroundTasks, body: dic
     return child
 
 
+@router.post("/{asset_id}/add-to-project")
+async def add_to_project(asset_id: str, body: dict = Body(...)):
+    project_id = (body.get("project_id") or "").strip()
+    if not project_id:
+        raise HTTPException(400, "Falta project_id")
+    from app.services import project_service
+    if not project_service.get_project(project_id):
+        raise HTTPException(404, "Proyecto no encontrado")
+    try:
+        dest = await lib.add_to_project(asset_id, project_id)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(409, str(e))
+    return {"status": "added", "filename": dest.name, "project_id": project_id}
+
+
 @router.get("/{asset_id}/video")
 async def get_video(asset_id: str, request: Request):
     asset = lib.get_asset(asset_id)
