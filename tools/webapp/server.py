@@ -58,6 +58,8 @@ INDEX_HTML = """<!doctype html>
   #files .row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #eee; }
   #files .row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #files button { margin: 0; padding: 4px 10px; font-size: 12px; }
+  #files button.danger { background: #c0392b; }
+  #files button.secondary { background: #fff; color: #0C447C; border: 1px solid #ccc; }
   #player { margin-top: 16px; display: none; }
   #player video { width: 100%; border-radius: 8px; background: #000; }
 </style></head>
@@ -75,9 +77,13 @@ async function refreshFiles() {
   const data = await r.json();
   const el = document.getElementById('files');
   el.innerHTML = data.files.length
-    ? '<b>Descargados:</b>' + data.files.map(f =>
-        `<div class="row"><span>📄 ${f}</span><button onclick="play('${f.replace(/'/g, "\\'")}')">▶ Ver</button></div>`
-      ).join('')
+    ? '<b>Descargados:</b>' + data.files.map(f => {
+        const n = f.replace(/'/g, "\\'");
+        return `<div class="row"><span>📄 ${f}</span>
+          <button onclick="play('${n}')">▶ Ver</button>
+          <button class="secondary" onclick="reveal('${n}')">📁 Ubicación</button>
+          <button class="danger" onclick="del('${n}')">🗑 Borrar</button></div>`;
+      }).join('')
     : '';
 }
 function play(name) {
@@ -87,6 +93,21 @@ function play(name) {
   player.style.display = 'block';
   video.play().catch(() => {});
   player.scrollIntoView({behavior: 'smooth'});
+}
+async function reveal(name) {
+  await fetch('/api/reveal/' + encodeURIComponent(name), {method: 'POST'});
+}
+async function del(name) {
+  if (!confirm('¿Borrar "' + name + '"? No se puede deshacer.')) return;
+  const r = await fetch('/api/files/' + encodeURIComponent(name), {method: 'DELETE'});
+  if (r.ok) {
+    if (document.getElementById('video').src.includes(encodeURIComponent(name))) {
+      document.getElementById('player').style.display = 'none';
+    }
+    refreshFiles();
+  } else {
+    alert('No se pudo borrar el archivo.');
+  }
 }
 async function poll(jobId) {
   const r = await fetch('/api/status/' + jobId);
@@ -155,11 +176,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def _serve_file(self, raw_name: str):
+    def _resolve_safe(self, raw_name: str):
+        """Resuelve un nombre de archivo dentro de DOWNLOAD_DIR, o None si no
+        existe o intenta escapar del directorio (path traversal)."""
         name = urllib.parse.unquote(raw_name)
         path = (DOWNLOAD_DIR / name).resolve()
-        # Path traversal guard: el archivo resuelto debe seguir dentro de DOWNLOAD_DIR.
         if DOWNLOAD_DIR.resolve() not in path.parents or not path.is_file():
+            return None
+        return path
+
+    def _serve_file(self, raw_name: str):
+        path = self._resolve_safe(raw_name)
+        if path is None:
             self.send_response(404)
             self.end_headers()
             return
@@ -210,6 +238,22 @@ class Handler(BaseHTTPRequestHandler):
             JOBS[job_id] = {"status": "pending", "url": url, "file": None, "error": None}
             threading.Thread(target=_run_download, args=(job_id, url), daemon=True).start()
             return self._json({"job_id": job_id})
+        if self.path.startswith("/api/reveal/"):
+            path = self._resolve_safe(self.path[len("/api/reveal/"):])
+            if path is None:
+                return self._json({"error": "Archivo no encontrado"}, 404)
+            subprocess.run(["open", "-R", str(path)])
+            return self._json({"ok": True})
+        self.send_response(404)
+        self.end_headers()
+
+    def do_DELETE(self):
+        if self.path.startswith("/api/files/"):
+            path = self._resolve_safe(self.path[len("/api/files/"):])
+            if path is None:
+                return self._json({"error": "Archivo no encontrado"}, 404)
+            path.unlink()
+            return self._json({"ok": True})
         self.send_response(404)
         self.end_headers()
 
