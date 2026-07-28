@@ -154,6 +154,91 @@ def create_pending_asset(url: str) -> dict:
         db.close()
 
 
+def create_trim_child(parent: dict, start: float, end: float) -> dict:
+    child_id = uuid.uuid4().hex[:12]
+    db = SessionLocal()
+    try:
+        child = MediaAsset(
+            id=child_id, parent_id=parent["id"], source_url=parent["source_url"],
+            source_type=parent["source_type"], title=parent.get("title") or "",
+            status="trimming", trim_start=start, trim_end=end,
+        )
+        db.add(child)
+        db.commit()
+        db.refresh(child)
+        return child.to_dict()
+    finally:
+        db.close()
+
+
+async def trim_asset(child_id: str, parent_id: str, start: float, end: float):
+    """Background task: recorta [start,end) del asset padre con stream-copy
+    (sin recodificar — el pipeline de render ya recodifica al usar el clip,
+    recodificar acá sería trabajo duplicado). El corte cae en el keyframe más
+    cercano, no es frame-exacto."""
+    parent = get_asset(parent_id)
+    if not parent or parent["status"] != "ready" or not parent.get("file_path"):
+        _update(child_id, status="error", error="El asset original no está listo.")
+        return
+
+    src = Path(parent["file_path"])
+    if not src.exists():
+        try:
+            from app.services import cloud_storage
+            restored = await cloud_storage.restore_library_asset(
+                parent_id, parent.get("cloud_video_public_id"), src)
+            if not restored:
+                raise RuntimeError("no restaurado")
+        except Exception:
+            _update(child_id, status="error",
+                    error="El archivo original ya no está disponible localmente ni en la nube.")
+            return
+
+    dest = _video_path(child_id)
+    duration = max(0.0, end - start)
+
+    # Stream-copy primero (rápido, sin recodificar — el pipeline de render ya
+    # recodifica al usar el clip). Si el códec de origen no es compatible con
+    # mp4 (p. ej. Theora/VP8 en un contenedor viejo), cae a recodificar.
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
+        "-c", "copy", str(dest),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    copy_ok = proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0
+
+    if not copy_ok:
+        log.info(f"Trim {child_id}: stream-copy falló, recodificando ({stderr.decode()[-200:]})")
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
+            "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+            "-c:a", "aac", str(dest),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+            _update(child_id, status="error", error=stderr.decode()[-500:] or "ffmpeg falló al recortar")
+            return
+
+    real_duration = await probe_duration(dest)
+    width, height = await _probe_dimensions(dest)
+    thumb = _thumb_path(child_id)
+    has_thumb = await _generate_thumbnail(dest, thumb, timestamp=min(1.0, real_duration / 2 if real_duration else 0.0))
+
+    _update(
+        child_id, status="ready",
+        duration=real_duration or duration, width=width, height=height,
+        file_path=str(dest), thumbnail_path=str(thumb) if has_thumb else None,
+    )
+
+    try:
+        from app.services import cloud_storage
+        await cloud_storage.upload_library_asset(child_id, dest, thumb if has_thumb else None)
+    except Exception as e:
+        log.warning(f"Subida a Cloudinary del recorte {child_id} falló (se reintenta on-demand): {e}")
+
+
 def get_asset(asset_id: str) -> dict | None:
     db = SessionLocal()
     try:

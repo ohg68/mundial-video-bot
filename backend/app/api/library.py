@@ -31,6 +31,25 @@ async def get_media(asset_id: str):
     return asset
 
 
+@router.post("/{asset_id}/trim")
+async def trim_media(asset_id: str, background_tasks: BackgroundTasks, body: dict = Body(...)):
+    parent = lib.get_asset(asset_id)
+    if not parent:
+        raise HTTPException(404, "Asset no encontrado")
+    if parent["status"] != "ready":
+        raise HTTPException(409, "El asset todavía no está listo")
+    try:
+        start = float(body.get("start"))
+        end = float(body.get("end"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "start/end deben ser números")
+    if start < 0 or end <= start or (parent["duration"] and end > parent["duration"] + 0.5):
+        raise HTTPException(400, "Rango de recorte inválido")
+    child = lib.create_trim_child(parent, start, end)
+    background_tasks.add_task(lib.trim_asset, child["id"], asset_id, start, end)
+    return child
+
+
 @router.get("/{asset_id}/thumbnail")
 async def get_thumbnail(asset_id: str):
     asset = lib.get_asset(asset_id)
