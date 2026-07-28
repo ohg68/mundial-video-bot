@@ -22,7 +22,7 @@ COPY backend/ .
 
 COPY --from=frontend-build /app/frontend/dist ./static
 
-RUN mkdir -p projects clips music
+RUN mkdir -p projects clips music media_library
 
 EXPOSE ${PORT:-8000}
 

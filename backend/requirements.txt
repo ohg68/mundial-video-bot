@@ -14,3 +14,4 @@ faster-whisper==1.2.0
 cloudinary==1.41.0
 onnxruntime==1.19.2
 rembg==2.0.61
+yt-dlp==2025.10.14
