@@ -123,6 +123,8 @@ class MediaAsset(Base):
             "thumbnail_path": self.thumbnail_path,
             "trim_start": self.trim_start,
             "trim_end": self.trim_end,
+            "cloud_video_public_id": self.cloud_video_public_id,
+            "cloud_thumb_public_id": self.cloud_thumb_public_id,
             "owner_id": self.owner_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
