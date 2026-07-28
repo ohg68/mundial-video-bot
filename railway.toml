@@ -1,6 +1,8 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+# dockerfilePath se define por servicio via RAILWAY_DOCKERFILE_PATH:
+#   layercut    → Dockerfile (raíz, default)
+#   hyperframes → hyperframes-service/Dockerfile
 
 [deploy]
 healthcheckPath = "/health"
