@@ -272,6 +272,55 @@ async def restore_all_layers() -> int:
     return total
 
 
+async def upload_library_asset(asset_id: str, video_path: Path, thumb_path: Optional[Path] = None) -> dict:
+    """Sube un asset de la Biblioteca de vídeos a Cloudinary, en un namespace
+    propio (layercut/library/...) separado del de proyectos. Se llama justo
+    después de que import_from_url/trim_asset dejan el asset en status=ready
+    — subida inmediata, restore perezoso (solo on-demand, no en cada
+    arranque: a diferencia de las 5 capas fijas por proyecto, la biblioteca
+    puede crecer sin límite)."""
+    if not is_configured():
+        return {}
+
+    result = {}
+    try:
+        if video_path.exists():
+            video_public_id = f"layercut/library/{asset_id}/video"
+            url = await asyncio.to_thread(_upload_video, video_path, video_public_id)
+            if url:
+                result["cloud_video_public_id"] = video_public_id
+        if thumb_path and thumb_path.exists():
+            thumb_public_id = f"layercut/library/{asset_id}/thumb"
+            url = await asyncio.to_thread(_upload_raw, thumb_path, thumb_public_id)
+            if url:
+                result["cloud_thumb_public_id"] = thumb_public_id
+    except Exception as e:
+        log.error(f"Error subiendo asset de biblioteca {asset_id} a Cloudinary: {e}")
+        return result
+
+    if result:
+        from app.services import media_library_service as lib
+        lib._update(asset_id, **result)
+        log.info(f"Asset de biblioteca {asset_id} subido a Cloudinary")
+    return result
+
+
+async def restore_library_asset(asset_id: str, cloud_video_public_id: Optional[str], dest: Path) -> bool:
+    """Restaura el vídeo de un asset de biblioteca desde Cloudinary — solo se
+    llama on-demand (add_to_project, trim_asset o GET /video) cuando el
+    archivo local ya no existe (p. ej. tras un redeploy de Railway)."""
+    if not is_configured() or not cloud_video_public_id:
+        return False
+    try:
+        ok = await asyncio.to_thread(_download, cloud_video_public_id, "video", dest)
+        if ok:
+            log.info(f"Asset de biblioteca {asset_id} restaurado desde Cloudinary")
+        return ok
+    except Exception as e:
+        log.error(f"Error restaurando asset de biblioteca {asset_id}: {e}")
+        return False
+
+
 async def list_project_assets(project_id: str) -> list:
     if not is_configured():
         return []
