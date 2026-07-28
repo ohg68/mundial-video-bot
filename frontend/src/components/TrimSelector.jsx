@@ -100,12 +100,12 @@ export default function TrimSelector({ asset, mode, onClose, onTrimmed, onAddToP
           <input
             type="range" min={0} max={duration} step={0.1} value={start}
             onChange={e => setStart(clampStart(Number(e.target.value)))}
-            className="absolute w-full accent-[#0C447C]"
+            className="dual-range absolute w-full accent-[#0C447C]"
           />
           <input
             type="range" min={0} max={duration} step={0.1} value={end}
             onChange={e => setEnd(clampEnd(Number(e.target.value)))}
-            className="absolute w-full accent-amber-500"
+            className="dual-range absolute w-full accent-amber-500"
           />
         </div>
 
