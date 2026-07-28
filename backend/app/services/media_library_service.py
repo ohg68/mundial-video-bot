@@ -106,7 +106,8 @@ async def import_from_url(asset_id: str, url: str):
                 _update(asset_id, status="error", error=stderr.decode()[-500:] or "yt-dlp falló")
                 return
         else:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; LayerCutImporter/1.0)"}
+            async with httpx.AsyncClient(follow_redirects=True, timeout=120, headers=headers) as client:
                 resp = await client.get(url)
             if resp.status_code != 200 or len(resp.content) < 10000:
                 _update(asset_id, status="error",
