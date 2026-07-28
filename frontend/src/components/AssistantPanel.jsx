@@ -7,7 +7,14 @@ const SUGGESTIONS = [
   "Cambiá la fuente de video a Pexels",
 ]
 
-export default function AssistantPanel({ projectId, onClose, onUpdate }) {
+const REVIEW_SUGGESTIONS = [
+  "La música está muy alta",
+  "Los subtítulos son muy chicos",
+  "La voz habla muy rápido",
+  "El logo tapa algo, movelo",
+]
+
+export default function AssistantPanel({ projectId, reviewMode = false, onClose, onUpdate }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState("")
   const [sending, setSending] = useState(false)
@@ -67,7 +74,14 @@ export default function AssistantPanel({ projectId, onClose, onUpdate }) {
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:w-[560px] sm:max-w-[95vw] border border-gray-200 max-h-[85dvh] flex flex-col overflow-hidden">
         <div className="flex justify-between items-center px-5 py-4 border-b border-gray-100">
-          <h2 className="m-0 text-base font-medium">🤖 Asistente IA</h2>
+          <div>
+            <h2 className="m-0 text-base font-medium">{reviewMode ? "💬 ¿Qué querés cambiar?" : "🤖 Asistente IA"}</h2>
+            {reviewMode && (
+              <p className="m-0 text-xs text-gray-400 mt-0.5">
+                Contame en tus palabras y lo ajusto — después volvemos a generar el video.
+              </p>
+            )}
+          </div>
           <button onClick={onClose} className="bg-transparent border-none cursor-pointer text-lg text-gray-400 hover:text-gray-600 p-1">✕</button>
         </div>
 
@@ -81,10 +95,12 @@ export default function AssistantPanel({ projectId, onClose, onUpdate }) {
           {messages.length === 0 && (
             <div className="text-center py-6">
               <p className="text-sm text-gray-400 mb-3">
-                Pedime ajustes en lenguaje natural antes de renderizar.
+                {reviewMode
+                  ? "Decime qué no te convence del video — no hace falta que sepas de \"capas\" ni \"config\", solo contame."
+                  : "Pedime ajustes en lenguaje natural antes de renderizar."}
               </p>
               <div className="flex flex-col gap-1.5 items-center">
-                {SUGGESTIONS.map(s => (
+                {(reviewMode ? REVIEW_SUGGESTIONS : SUGGESTIONS).map(s => (
                   <button
                     key={s}
                     onClick={() => send(s)}
@@ -128,7 +144,7 @@ export default function AssistantPanel({ projectId, onClose, onUpdate }) {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ej: bajá la música y subí el volumen de la voz"
+            placeholder={reviewMode ? "Ej: la música tapa la voz" : "Ej: bajá la música y subí el volumen de la voz"}
             rows={1}
             className="flex-1 input-field text-sm resize-none"
             disabled={!configured}

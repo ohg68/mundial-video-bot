@@ -30,18 +30,24 @@ MAX_TOOL_ROUNDS = 6
 SYSTEM_PROMPT = """Sos el asistente de edición de LayerCut, una herramienta que arma videos \
 verticales para redes (guion + narración TTS + clips de video + música + subtítulos + overlay).
 
-Ayudás al usuario a ajustar la configuración de su proyecto ANTES de renderizar, por chat, \
-en español. No editás video directamente: cambiás campos de configuración y disparás \
-generación de capas cuando hace falta, usando las funciones disponibles.
+Ayudás al usuario, en español y en tono amigable y cercano (no técnico), a revisar su video \
+y pedir cambios en lenguaje simple — tanto ANTES de renderizar como DESPUÉS de ver el \
+resultado. No editás video directamente: cambiás campos de configuración, regenerás capas y \
+disparás el render final usando las funciones disponibles.
 
 Reglas:
 - Actuá, no preguntes de más. Si el pedido es claro, aplicá el cambio con la función correcta \
-y confirmá en una frase corta.
+y confirmá en una frase corta y cálida (nada de jerga técnica como "config" o "layer" — \
+hablá de "la música", "el video", "los subtítulos").
 - Usá get_project_state SOLO si necesitás saber un valor actual antes de decidir (por ejemplo, \
 para saber si ya hay overlay antes de mezclarlo con algo). No la llames por rutina.
 - Sé breve. Una o dos frases por respuesta, sin listas largas ni explicaciones de más.
+- Cuando el usuario está revisando un video YA renderizado y pide un cambio (ej. "bajá la \
+música", "el logo muy grande"), aplicá el cambio, regenerá la capa afectada si hace falta \
+con regenerate_layer, y ofrecé volver a renderizar con render_final — pero solo disparalo si \
+el usuario lo confirma o dice algo como "sí, volvé a hacerlo" / "renderizá de nuevo".
 - Si el pedido no tiene una función que lo cubra (ej. "cambiá el guion a que hable de X"), \
-decilo y sugerí el lugar correcto de la interfaz.
+decilo de forma simple y sugerí el lugar correcto de la interfaz.
 """
 
 TOOLS = [
@@ -170,6 +176,17 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "render_final",
+            "description": "Compone el video final con la configuración y capas actuales "
+                           "(tarda 1-2 minutos). Usala cuando el usuario confirma que quiere "
+                           "ver el resultado con los cambios aplicados, típicamente después de "
+                           "ajustar algo y regenerar la capa correspondiente.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
@@ -198,7 +215,7 @@ def _summarize_state(meta: dict) -> dict:
 
 async def _execute_tool(project_id: str, name: str, tool_input: dict) -> str:
     """Ejecuta una tool y devuelve un string corto para el modelo (no JSON gigante)."""
-    from app.services import project_service, layer_service, bg_removal_service
+    from app.services import project_service, layer_service, bg_removal_service, render_service
     from app.models.project import LayerStatus
 
     if name == "get_project_state":
@@ -265,6 +282,24 @@ async def _execute_tool(project_id: str, name: str, tool_input: dict) -> str:
         from app.services import cloud_storage
         await cloud_storage.upload_layer(project_id, "overlay", overlay_path)
         return "Fondo del overlay eliminado."
+
+    if name == "render_final":
+        try:
+            output = await render_service.render_final(project_id)
+        except Exception as e:
+            return f"Error al renderizar: {e}"
+
+        from app.api.render import _save_to_history
+        _save_to_history(project_id, output, "full")
+
+        from app.services import cloud_storage
+        await cloud_storage.upload_render(project_id, output)
+        await cloud_storage.backup_db()
+
+        project_service.update_layer_status(project_id, "video", LayerStatus.ready, {
+            "output": str(output),
+        })
+        return "Video renderizado. Ya podés verlo y descargarlo."
 
     return f"Error: función desconocida '{name}'."
 

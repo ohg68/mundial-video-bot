@@ -29,6 +29,7 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
   const [showEditing, setShowEditing] = useState(false)
   const [showMotion, setShowMotion] = useState(false)
   const [showAssistant, setShowAssistant] = useState(false)
+  const [assistantReviewMode, setAssistantReviewMode] = useState(false)
   const [layerDurations, setLayerDurations] = useState(null)
 
   const { connected, lastEvent, progress, taskType, isRunning, isDone, isFailed } = useProjectSocket(project.id)
@@ -40,7 +41,14 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
 
   const fetchDurations = async () => {
     const data = await apiJson(`/api/render/${project.id}/durations`)
-    if (data.layers) setLayerDurations(data.layers)
+    if (data.layers) {
+      setLayerDurations(data.layers)
+      // Si ya existe un render (de esta sesión o de una anterior), mostrar
+      // la tarjeta de revisión — no depende de haber apretado "Render" ahora.
+      if (data.layers.output?.exists) {
+        setOutputUrl(`/api/render/${project.id}/download`)
+      }
+    }
   }
 
   useEffect(() => { fetchDurations() }, [project.id])
@@ -112,7 +120,7 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
           </div>
         </div>
         <div className="flex gap-2 items-center shrink-0 flex-wrap justify-end">
-          <button onClick={() => setShowAssistant(true)} className="btn-outline bg-blue-50 border-blue-300 text-[#0C447C] font-medium">🤖 Asistente IA</button>
+          <button onClick={() => { setAssistantReviewMode(false); setShowAssistant(true) }} className="btn-outline bg-blue-50 border-blue-300 text-[#0C447C] font-medium">🤖 Asistente IA</button>
           <button onClick={() => setShowScript(true)} className="btn-outline">✏️ Guión</button>
           <button onClick={() => setShowEditing(true)} className="btn-outline">🎬 Edición</button>
           <button onClick={() => setShowMotion(true)} className="btn-outline">✨ Intro/Outro</button>
@@ -174,19 +182,33 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
       <VideoPreview projectId={project.id} layers={layerDurations} />
       <Timeline layers={layerDurations} />
 
-      {/* Output card */}
+      {/* Output card — revisión amigable del video ya renderizado */}
       {outputUrl && (
-        <div className="bg-green-50 border border-green-400 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <div className="font-medium text-sm text-green-900">✅ Vídeo listo</div>
-            <div className="text-xs text-green-700">{project.title}</div>
+        <div className="bg-green-50 border border-green-400 rounded-xl p-4 mb-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+            <div>
+              <div className="font-medium text-sm text-green-900">✅ Tu video está listo</div>
+              <div className="text-xs text-green-700">¿Te gusta cómo quedó, o querés cambiar algo?</div>
+            </div>
+            <div className="flex gap-2">
+              <a href={outputUrl} download className="btn-outline no-underline text-[13px]">⬇ Descargar</a>
+              <button onClick={() => setShowPublish(true)} className="btn-outline">
+                📤 Publicar
+              </button>
+            </div>
           </div>
-          <div className="flex gap-2">
-            <a href={outputUrl} download className="btn-outline no-underline text-[13px]">⬇ Descargar</a>
-            <button onClick={() => setShowPublish(true)} className="btn-outline">
-              📤 Publicar
-            </button>
-          </div>
+          <video
+            key={outputUrl}
+            src={outputUrl}
+            controls
+            className="w-full max-h-[400px] rounded-lg bg-black mb-3"
+          />
+          <button
+            onClick={() => { setAssistantReviewMode(true); setShowAssistant(true) }}
+            className="w-full py-2.5 rounded-lg border-none text-sm font-medium bg-[#185FA5] text-blue-100 cursor-pointer hover:bg-[#0C447C] transition-colors"
+          >
+            💬 Pedir cambios
+          </button>
         </div>
       )}
 
@@ -259,6 +281,7 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
       {showAssistant && (
         <AssistantPanel
           projectId={project.id}
+          reviewMode={assistantReviewMode}
           onClose={() => setShowAssistant(false)}
           onUpdate={() => {
             apiJson(`/api/projects/${project.id}`).then(d => { if (d.id) setProject(d) })
