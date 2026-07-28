@@ -81,6 +81,54 @@ class ShareLink(Base):
     project = relationship("Project")
 
 
+class MediaAsset(Base):
+    __tablename__ = "media_assets"
+    id = Column(String(12), primary_key=True)
+    # Recorte de otro asset ya importado — nullable para no depender de ningún
+    # otro registro (evita el problema de FK NOT NULL que tiene TaskRecord).
+    parent_id = Column(String(12), ForeignKey("media_assets.id"), nullable=True)
+    source_url = Column(Text, nullable=False)
+    source_type = Column(String(20), default="youtube")  # "youtube" | "direct"
+    title = Column(String(300), default="")
+    # El estado del job vive en la propia fila (pending/downloading/trimming/
+    # ready/error) — se consulta por polling, sin depender de TaskRecord.
+    status = Column(String(20), default="pending")
+    error = Column(Text, default=None)
+    duration = Column(Float, default=0.0)
+    width = Column(Integer, default=0)
+    height = Column(Integer, default=0)
+    file_path = Column(String(500), default=None)
+    thumbnail_path = Column(String(500), default=None)
+    trim_start = Column(Float, default=None)
+    trim_end = Column(Float, default=None)
+    cloud_video_public_id = Column(String(300), default=None)
+    cloud_thumb_public_id = Column(String(300), default=None)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "parent_id": self.parent_id,
+            "source_url": self.source_url,
+            "source_type": self.source_type,
+            "title": self.title,
+            "status": self.status,
+            "error": self.error,
+            "duration": self.duration,
+            "width": self.width,
+            "height": self.height,
+            "file_path": self.file_path,
+            "thumbnail_path": self.thumbnail_path,
+            "trim_start": self.trim_start,
+            "trim_end": self.trim_end,
+            "owner_id": self.owner_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class ScheduledPost(Base):
     __tablename__ = "scheduled_posts"
     id = Column(Integer, primary_key=True, autoincrement=True)
