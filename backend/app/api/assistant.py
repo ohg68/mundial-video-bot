@@ -1,4 +1,4 @@
-"""Asistente conversacional de edición (chat con Claude antes de renderizar)."""
+"""Asistente conversacional de edición (chat con DeepSeek antes de renderizar)."""
 from fastapi import APIRouter, HTTPException, Body
 from app.services import ai_editor_service, project_service
 
@@ -8,24 +8,22 @@ router = APIRouter()
 @router.get("/status")
 def status():
     import os
-    return {"configured": bool(os.getenv("ANTHROPIC_API_KEY"))}
+    return {"configured": bool(os.getenv("DEEPSEEK_API_KEY"))}
 
 
 @router.get("/{project_id}/history")
 def get_history(project_id: str):
     history = ai_editor_service.get_history(project_id)
-    # Filtrar a solo los turnos de texto (el frontend no necesita los bloques de tool_use)
+    # Solo turnos de texto de user/assistant — el frontend no necesita el
+    # system prompt ni los mensajes de tool_calls/tool.
     out = []
     for msg in history:
-        content = msg["content"]
-        if isinstance(content, str):
-            out.append({"role": msg["role"], "text": content})
-        elif isinstance(content, list):
-            texts = [b.get("text") if isinstance(b, dict) else getattr(b, "text", None)
-                     for b in content]
-            texts = [t for t in texts if t]
-            if texts:
-                out.append({"role": msg["role"], "text": " ".join(texts)})
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content:
+            out.append({"role": role, "text": content})
     return {"history": out}
 
 
@@ -44,7 +42,7 @@ async def chat(project_id: str, body: dict = Body(...)):
     if not message:
         raise HTTPException(status_code=400, detail="message requerido")
 
-    model = body.get("model")  # opcional: "claude-sonnet-5" para pedidos complejos
+    model = body.get("model")  # opcional, default "deepseek-chat"
 
     try:
         result = await ai_editor_service.chat(project_id, message, model=model)

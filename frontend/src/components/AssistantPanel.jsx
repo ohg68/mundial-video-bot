@@ -73,7 +73,7 @@ export default function AssistantPanel({ projectId, onClose, onUpdate }) {
 
         {!configured && (
           <div className="mx-5 mt-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-            El asistente no está configurado (falta ANTHROPIC_API_KEY).
+            El asistente no está configurado (falta DEEPSEEK_API_KEY).
           </div>
         )}
 
