@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from app.api import projects, layers, render, publish, sources, share, gdrive
+from app.api import projects, layers, render, publish, sources, share, gdrive, editing, motion, assistant
 from app.auth import router as auth_router
 from app.database import init_db
 from app.migrate import migrate_json_to_db
@@ -18,9 +18,30 @@ logging.basicConfig(level=logging.INFO)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
+    from app.services import cloud_storage
+
+    await cloud_storage.restore_db()
+
     init_db()
     migrate_json_to_db()
+
+    # Restaurar archivos de capas de todos los proyectos (disco efímero en Railway)
+    try:
+        await cloud_storage.restore_all_layers()
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Restore de capas falló: {e}")
+
     await task_queue.start()
+
+    async def _periodic_backup():
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await cloud_storage.backup_db()
+            except Exception as e:
+                logging.getLogger(__name__).error(f"Backup periódico falló: {e}")
+
+    app.state.backup_task = asyncio.create_task(_periodic_backup())
 
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if telegram_token:
@@ -45,6 +66,7 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).info("TELEGRAM_BOT_TOKEN no configurado — bot desactivado")
 
     yield
+    await cloud_storage.backup_db()
     await task_queue.stop()
 
 
@@ -59,6 +81,9 @@ app.include_router(publish.router, prefix="/api/publish", tags=["publish"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
 app.include_router(share.router, prefix="/api/share", tags=["share"])
 app.include_router(gdrive.router, prefix="/api/gdrive", tags=["gdrive"])
+app.include_router(editing.router, prefix="/api/editing", tags=["editing"])
+app.include_router(motion.router, prefix="/api/motion", tags=["motion"])
+app.include_router(assistant.router, prefix="/api/assistant", tags=["assistant"])
 
 app.add_api_websocket_route("/ws/{project_id}", websocket_endpoint)
 

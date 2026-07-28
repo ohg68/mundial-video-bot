@@ -5,6 +5,9 @@ import VideoPreview from "./VideoPreview"
 import Timeline from "./Timeline"
 import RenderHistory from "./RenderHistory"
 import PublishPanel from "./PublishPanel"
+import EditingPanel from "./EditingPanel"
+import MotionPanel from "./MotionPanel"
+import AssistantPanel from "./AssistantPanel"
 import useProjectSocket from "../hooks/useProjectSocket"
 import { apiJson } from "../api"
 
@@ -23,6 +26,9 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
   const [showScript, setShowScript] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [showPublish, setShowPublish] = useState(false)
+  const [showEditing, setShowEditing] = useState(false)
+  const [showMotion, setShowMotion] = useState(false)
+  const [showAssistant, setShowAssistant] = useState(false)
   const [layerDurations, setLayerDurations] = useState(null)
 
   const { connected, lastEvent, progress, taskType, isRunning, isDone, isFailed } = useProjectSocket(project.id)
@@ -106,7 +112,10 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
           </div>
         </div>
         <div className="flex gap-2 items-center shrink-0 flex-wrap justify-end">
+          <button onClick={() => setShowAssistant(true)} className="btn-outline bg-blue-50 border-blue-300 text-[#0C447C] font-medium">🤖 Asistente IA</button>
           <button onClick={() => setShowScript(true)} className="btn-outline">✏️ Guión</button>
+          <button onClick={() => setShowEditing(true)} className="btn-outline">🎬 Edición</button>
+          <button onClick={() => setShowMotion(true)} className="btn-outline">✨ Intro/Outro</button>
           <button onClick={() => setShowHistory(true)} className="btn-outline">📂 Historial</button>
           <button onClick={() => setShowPublish(true)} className="btn-outline">📤 Publicar</button>
           <button onClick={handleClearRenders} className="btn-outline text-red-500 border-red-200 hover:bg-red-50">
@@ -225,6 +234,36 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
           projectId={project.id}
           title={project.title}
           onClose={() => setShowPublish(false)}
+        />
+      )}
+
+      {showEditing && (
+        <EditingPanel
+          projectId={project.id}
+          config={project.config}
+          onClose={() => setShowEditing(false)}
+          onSaved={() => {
+            apiJson(`/api/projects/${project.id}`).then(d => { if (d.id) setProject(d) })
+          }}
+        />
+      )}
+
+      {showMotion && (
+        <MotionPanel
+          projectId={project.id}
+          projectTitle={project.title}
+          onClose={() => setShowMotion(false)}
+        />
+      )}
+
+      {showAssistant && (
+        <AssistantPanel
+          projectId={project.id}
+          onClose={() => setShowAssistant(false)}
+          onUpdate={() => {
+            apiJson(`/api/projects/${project.id}`).then(d => { if (d.id) setProject(d) })
+            fetchDurations()
+          }}
         />
       )}
     </div>

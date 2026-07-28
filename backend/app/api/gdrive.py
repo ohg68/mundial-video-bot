@@ -1,6 +1,6 @@
-"""Endpoints de ayuda para configurar/verificar Google Drive como fuente de video."""
+"""Endpoints de ayuda para configurar/verificar Google Drive como fuente de video y cloud storage."""
 from fastapi import APIRouter, HTTPException
-from app.services import gdrive_service
+from app.services import gdrive_service, cloud_storage
 
 router = APIRouter()
 
@@ -34,3 +34,48 @@ def folder_videos(folder_id: str):
         raise HTTPException(status_code=400, detail="GOOGLE_SERVICE_ACCOUNT_JSON no configurado")
     vids = gdrive_service.list_videos(folder_id)
     return {"count": len(vids), "videos": [{"id": v["id"], "name": v.get("name")} for v in vids]}
+
+
+@router.get("/storage/status")
+async def storage_status():
+    return {
+        "configured": cloud_storage.is_configured(),
+        "provider": "cloudinary",
+    }
+
+
+@router.post("/storage/backup")
+async def force_backup():
+    ok = await cloud_storage.backup_db()
+    return {"success": ok}
+
+
+@router.post("/storage/restore")
+async def force_restore():
+    ok = await cloud_storage.restore_db()
+    return {"success": ok}
+
+
+@router.post("/storage/upload/{project_id}")
+async def upload_project(project_id: str):
+    from pathlib import Path
+    project_dir = Path("projects") / project_id
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+    count = 0
+    for subdir in ["video", "audio", "music", "subtitles", "output"]:
+        sub_path = project_dir / subdir
+        if not sub_path.exists():
+            continue
+        for f in sub_path.iterdir():
+            if f.is_file() and f.stat().st_size > 0:
+                await cloud_storage.upload_layer_file(project_id, subdir, f)
+                count += 1
+    await cloud_storage.backup_db()
+    return {"uploaded_files": count}
+
+
+@router.get("/storage/assets/{project_id}")
+async def list_assets(project_id: str):
+    assets = await cloud_storage.list_project_assets(project_id)
+    return {"count": len(assets), "assets": assets}

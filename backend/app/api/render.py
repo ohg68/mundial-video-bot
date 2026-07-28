@@ -40,6 +40,10 @@ async def _do_render(project_id: str, quality: str = "full"):
         # Save to history
         _save_to_history(project_id, output, quality)
 
+        from app.services import cloud_storage
+        await cloud_storage.upload_render(project_id, output)
+        await cloud_storage.backup_db()
+
         project_service.update_layer_status(project_id, "video", "ready", {
             "output": str(output)
         })

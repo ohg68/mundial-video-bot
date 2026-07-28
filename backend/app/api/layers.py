@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
 from app.models.project import ProjectConfig, LayerUpdate, LayerStatus
-from app.services import project_service, layer_service, render_service, tts_service, llm_service, sfx_service
+from app.services import project_service, layer_service, render_service, tts_service, llm_service, sfx_service, bg_removal_service
 import tempfile, shutil, json
 from pathlib import Path
 
@@ -33,11 +33,11 @@ async def generate_layer(project_id: str, layer: str, background_tasks: Backgrou
         return {"status": "generating", "layer": "audio"}
 
     elif layer == "video":
-        background_tasks.add_task(layer_service.assemble_video_layer, project_id, config)
+        background_tasks.add_task(_generate_video_task, project_id, config)
         return {"status": "generating", "layer": "video"}
 
     elif layer == "subtitles":
-        background_tasks.add_task(layer_service.generate_subtitles, project_id, config)
+        background_tasks.add_task(_generate_subtitles_task, project_id, config)
         return {"status": "generating", "layer": "subtitles"}
 
     else:
@@ -65,6 +65,22 @@ async def _generate_audio_task(project_id: str, config: ProjectConfig):
         "provider": provider,
         "file": str(output_path),
     })
+    from app.services import cloud_storage
+    await cloud_storage.upload_layer(project_id, "audio", output_path)
+
+
+async def _generate_video_task(project_id: str, config: ProjectConfig):
+    await layer_service.assemble_video_layer(project_id, config)
+    from app.services import cloud_storage
+    await cloud_storage.upload_layer(
+        project_id, "video", project_service.get_layer_path(project_id, "video"))
+
+
+async def _generate_subtitles_task(project_id: str, config: ProjectConfig):
+    await layer_service.generate_subtitles(project_id, config)
+    from app.services import cloud_storage
+    await cloud_storage.upload_layer(
+        project_id, "subtitles", project_service.get_layer_path(project_id, "subtitles"))
 
 
 @router.post("/{project_id}/replace/{layer}")
@@ -87,12 +103,44 @@ async def replace_layer(project_id: str, layer: str, file: UploadFile = File(...
     if not success:
         raise HTTPException(status_code=500, detail="Failed to replace layer file")
 
+    from app.services import cloud_storage
+    await cloud_storage.upload_layer(
+        project_id, layer, project_service.get_layer_path(project_id, layer))
+
     return {
         "status": "replaced",
         "layer": layer,
         "filename": file.filename,
         "project_id": project_id,
     }
+
+
+@router.post("/{project_id}/overlay/remove-bg")
+async def remove_overlay_background(project_id: str):
+    """Quita el fondo del overlay/logo actual (in-place) usando rembg."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    overlay_path = project_service.get_layer_path(project_id, "overlay")
+    if not overlay_path.exists():
+        raise HTTPException(status_code=400, detail="Subí un logo/overlay antes de quitar el fondo")
+
+    tmp_out = overlay_path.with_suffix(".nobg.png")
+    ok = await bg_removal_service.remove_background(overlay_path, tmp_out)
+    if not ok:
+        tmp_out.unlink(missing_ok=True)
+        raise HTTPException(status_code=502, detail="No se pudo quitar el fondo de la imagen")
+
+    tmp_out.replace(overlay_path)
+    project_service.update_layer_status(project_id, "overlay", LayerStatus.ready, {
+        "source": "custom", "file": str(overlay_path), "bg_removed": True,
+    })
+
+    from app.services import cloud_storage
+    await cloud_storage.upload_layer(project_id, "overlay", overlay_path)
+
+    return {"status": "bg_removed", "project_id": project_id}
 
 
 @router.patch("/{project_id}/config/{layer}")
@@ -272,23 +320,32 @@ async def _run_pipeline(project_id: str):
 
     config = ProjectConfig(**meta["config"])
 
+    from app.services import cloud_storage
     try:
         # 1. Audio (TTS) y subtitulos sincronizados con el audio (Whisper con
         #    fallback a reparto calculado).
         _set_pipeline(project_id, "audio", "running")
         await layer_service.generate_audio(project_id, config)
+        await cloud_storage.upload_layer(
+            project_id, "audio", project_service.get_layer_path(project_id, "audio"))
         try:
             await layer_service.generate_subtitles(project_id, config)
+            await cloud_storage.upload_layer(
+                project_id, "subtitles", project_service.get_layer_path(project_id, "subtitles"))
         except Exception:
             pass  # sin subtitulos no se cae el pipeline; el render los omite
 
         # 2. Capa de video (descarga/normaliza clips y concatena).
         _set_pipeline(project_id, "video", "running")
         await layer_service.assemble_video_layer(project_id, config)
+        await cloud_storage.upload_layer(
+            project_id, "video", project_service.get_layer_path(project_id, "video"))
 
         # 3. Render final (compone todo + loudnorm).
         _set_pipeline(project_id, "render", "running")
-        await render_service.render_final(project_id)
+        output = await render_service.render_final(project_id)
+        await cloud_storage.upload_render(project_id, output)
+        await cloud_storage.backup_db()
 
         _set_pipeline(project_id, "done", "ok")
 

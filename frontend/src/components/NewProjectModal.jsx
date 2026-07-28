@@ -14,7 +14,7 @@ const CATEGORIES = [
 export default function NewProjectModal({ onCreated, onClose }) {
   const [form, setForm] = useState({
     title: "", topic: "", category: "", date: "",
-    aspect: "9:16", language: "es",
+    aspect: "9:16", language: "es", video_type: "",
   })
   const [loading, setLoading] = useState(false)
 
@@ -76,6 +76,16 @@ export default function NewProjectModal({ onCreated, onClose }) {
               <label className="block text-xs text-gray-400 mb-1">Fecha (opcional)</label>
               <input type="date" value={form.date} onChange={e => set("date", e.target.value)} className="input-field" />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Tipo de vídeo</label>
+            <select value={form.video_type} onChange={e => set("video_type", e.target.value)} className="input-field">
+              <option value="">— Sin tipo (estándar) —</option>
+              <option value="marketing">📊 Marketing / Promoción</option>
+              <option value="music">🎵 Musical</option>
+              <option value="sports">⚽ Deportes</option>
+            </select>
           </div>
 
           <div className="flex gap-3">

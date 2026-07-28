@@ -11,3 +11,7 @@ google-auth==2.29.0
 google-auth-oauthlib==1.2.0
 python-telegram-bot[ext]==21.3
 faster-whisper==1.2.0
+cloudinary==1.41.0
+onnxruntime==1.19.2
+rembg==2.0.61
+anthropic==0.69.0

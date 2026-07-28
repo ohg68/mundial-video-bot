@@ -40,6 +40,11 @@ class ScriptTemplate(str, Enum):
     top5 = "top5"
     tutorial = "tutorial"
 
+class VideoType(str, Enum):
+    marketing = "marketing"
+    music = "music"
+    sports = "sports"
+
 class LayerStatus(str, Enum):
     empty = "empty"
     pending = "pending"
@@ -94,6 +99,12 @@ class OverlayLayerConfig(BaseModel):
     outro_file: Optional[str] = None
     lower_third: Optional[str] = None
 
+class EditingConfig(BaseModel):
+    video_type: Optional[str] = None
+    editing_prompt: Optional[str] = None
+    bpm: Optional[int] = None
+    editing_plan: Optional[dict] = None
+
 class ProjectConfig(BaseModel):
     title: str
     topic: str
@@ -101,8 +112,6 @@ class ProjectConfig(BaseModel):
     match_date: Optional[str] = None
     aspect: Literal["9:16", "16:9"] = "9:16"
     language: str = "es"
-    # Duración objetivo del video en segundos (60 o 90). Afecta el guion generado.
-    duration: int = 90
     script: Optional[str] = None
     llm_provider: LLMProvider = LLMProvider.deepseek
     script_template: ScriptTemplate = ScriptTemplate.free
@@ -111,6 +120,7 @@ class ProjectConfig(BaseModel):
     music: MusicLayerConfig = MusicLayerConfig()
     subtitles: SubtitleLayerConfig = SubtitleLayerConfig()
     overlay: OverlayLayerConfig = OverlayLayerConfig()
+    editing: EditingConfig = EditingConfig()
 
 class LayerUpdate(BaseModel):
     layer: Literal["video", "audio", "music", "subtitles", "overlay"]

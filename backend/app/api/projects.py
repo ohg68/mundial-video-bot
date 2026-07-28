@@ -18,9 +18,12 @@ def list_projects(
 
 
 @router.post("/")
-def create_project(config: ProjectConfig, user=Depends(get_optional_user)):
+async def create_project(config: ProjectConfig, user=Depends(get_optional_user)):
     owner_id = user["user_id"] if user else None
-    return project_service.create_project(config, owner_id=owner_id)
+    result = project_service.create_project(config, owner_id=owner_id)
+    from app.services import cloud_storage
+    await cloud_storage.backup_db()
+    return result
 
 
 @router.get("/stats")

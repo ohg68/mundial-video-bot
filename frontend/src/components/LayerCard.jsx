@@ -41,6 +41,8 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
   const [showClipPicker, setShowClipPicker] = useState(false)
   const [previewingVoice, setPreviewingVoice] = useState(false)
   const [previewAudio, setPreviewAudio] = useState(null)
+  const [removingBg, setRemovingBg] = useState(false)
+  const [bgError, setBgError] = useState(null)
   const fileRef = useRef()
   const audioRef = useRef()
 
@@ -119,6 +121,23 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
     })
   }
 
+  const handleRemoveBg = async () => {
+    setRemovingBg(true)
+    setBgError(null)
+    try {
+      const res = await fetch(`/api/layers/${projectId}/overlay/remove-bg`, { method: "POST" })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setBgError(data.detail || `Error ${res.status}`)
+      } else {
+        onUpdate()
+      }
+    } catch (e) {
+      setBgError("Error de conexión")
+    }
+    setRemovingBg(false)
+  }
+
   const canGenerate = ["audio", "video", "subtitles"].includes(layer.key)
 
   return (
@@ -180,7 +199,18 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
                 ⬇ Descargar capa
               </button>
             )}
+            {layer.key === "overlay" && status === "ready" && (
+              <button onClick={handleRemoveBg} disabled={removingBg} className="btn-action">
+                {removingBg ? "⏳ Quitando fondo..." : "🪄 Quitar fondo"}
+              </button>
+            )}
           </div>
+
+          {bgError && (
+            <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+              {bgError}
+            </div>
+          )}
 
           {/* Volume slider */}
           {volume !== null && (

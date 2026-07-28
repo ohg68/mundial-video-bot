@@ -253,7 +253,22 @@ async def render_final(project_id: str, quality: str = "full") -> Path:
         video_label = "[vov]"
 
     # Subtítulos SIEMPRE el último filtro de vídeo.
-    if has_subs and _check_subtitles_filter():
+    # Kinéticos (WebM alpha de HyperFrames) tienen prioridad sobre los ASS clásicos.
+    captions_path = project_dir / "motion" / "captions.webm"
+    has_kinetic = captions_path.exists() and captions_path.stat().st_size > 0
+
+    if has_kinetic:
+        sub_w, sub_h = (1080, 1920) if config.get("aspect", "9:16") == "9:16" else (1920, 1080)
+        # libvpx-vp9 como decoder de entrada: el decoder nativo ignora el canal alpha
+        inputs += ["-c:v", "libvpx-vp9", "-i", str(captions_path)]
+        cap_idx = next_idx
+        next_idx += 1
+        filter_parts.append(
+            f"[{cap_idx}:v]scale={sub_w}:{sub_h}[kincap];"
+            f"{video_label}[kincap]overlay=0:0:eof_action=pass[vkin]"
+        )
+        video_label = "[vkin]"
+    elif has_subs and _check_subtitles_filter():
         sub_cfg = config.get("subtitles", {})
         # Resolución real del video → ASS con PlayRes correcto (FontSize en px reales)
         sub_w, sub_h = (1080, 1920) if config.get("aspect", "9:16") == "9:16" else (1920, 1080)
@@ -351,6 +366,16 @@ async def render_final(project_id: str, quality: str = "full") -> Path:
             prenorm.replace(output_path)
         else:
             prenorm.unlink(missing_ok=True)
+
+    # ---- Intro/outro animados (HyperFrames) --------------------------------
+    # Solo en render full: el preview rápido se mantiene ligero.
+    if quality != "quick":
+        try:
+            from app.services import motion_service
+            await motion_service.concat_intro_outro(
+                project_id, output_path, config.get("aspect", "9:16"))
+        except Exception as e:
+            log.warning(f"Concat intro/outro omitido: {e}")
 
     size_mb = round(output_path.stat().st_size / 1024 / 1024, 1)
     meta["output"] = str(output_path)

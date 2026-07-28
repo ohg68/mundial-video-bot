@@ -79,11 +79,8 @@ async def generate_script(project_id: str, config: ProjectConfig) -> str:
         extra += f"\nFecha: {config.match_date}"
 
     lang_name = LANG_INFO.get(getattr(config, "language", "es"), LANG_INFO["es"])[0]
-    # Duración objetivo (60 o 90 s). ~2.5 palabras/seg leídas en voz alta.
-    duration = int(getattr(config, "duration", 90) or 90)
-    approx_words = int(duration * 2.5)
     prompt = f"""Eres un guionista de videos cortos para redes sociales (YouTube Shorts, TikTok, Reels).
-Genera un guion EN {lang_name} para un video corto de ~{duration} segundos sobre el siguiente tema.
+Genera un guion EN {lang_name} para un video corto de ~90 segundos sobre el siguiente tema.
 El guion completo debe estar escrito en {lang_name}.
 
 Título: {config.title}
@@ -97,7 +94,7 @@ El guion debe:
 - Tener un gancho potente en los primeros 5 segundos
 - Ser informativo, claro y atractivo
 - Terminar con una llamada a la acción (suscríbete, comenta)
-- Durar aproximadamente {duration} segundos al leerlo en voz alta (~{approx_words} palabras)
+- Durar aproximadamente 90 segundos al leerlo en voz alta
 - Contener solo el texto que leerá el narrador, sin indicaciones de escena ni acotaciones
 
 Responde SOLO con el guion, sin introducción ni explicación."""
@@ -313,12 +310,14 @@ def _get_whisper():
     return _whisper_model
 
 
-def _subtitles_with_whisper(audio_path: Path, script: str = "", language: str = "es") -> str:
+def _subtitles_with_whisper(audio_path: Path, script: str = "", language: str = "es",
+                            words_out: Path = None) -> str:
     """Escucha el audio con Whisper y devuelve un .srt con tiempos reales.
 
     Si se pasa el guion, usa la ortografía del guion con los tiempos de Whisper
     (corrige los errores de transcripción de Whisper, p.ej. nombres propios).
-    Devuelve cadena vacía si algo falla (el llamador hará fallback).
+    Si se pasa words_out, guarda ahí los tiempos por palabra (para subtítulos
+    kinéticos). Devuelve cadena vacía si algo falla (el llamador hará fallback).
     """
     try:
         model = _get_whisper()
@@ -336,12 +335,21 @@ def _subtitles_with_whisper(audio_path: Path, script: str = "", language: str = 
         # Si tenemos el guion, sustituir las palabras de Whisper por las del
         # guion (ortografía correcta) manteniendo los tiempos.
         script_words = script.split() if script else []
-        if script_words:
-            aligned = _align_script_to_times(script_words, words)
-            return _build_srt_from_words(aligned)
-        return _build_srt_from_words(words)
+        final_words = _align_script_to_times(script_words, words) if script_words else words
+        if words_out is not None:
+            _write_words_json(final_words, words_out)
+        return _build_srt_from_words(final_words)
     except Exception:
         return ""
+
+
+def _write_words_json(words, dest: Path):
+    """Guarda los tiempos por palabra: [{"w": texto, "s": inicio, "e": fin}, ...]"""
+    try:
+        data = [{"w": w, "s": round(s, 3), "e": round(e, 3)} for (w, s, e) in words]
+        dest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _voice_range(path: Path, total: float) -> tuple:
@@ -423,6 +431,31 @@ def _build_srt_by_duration(text: str, total_seconds: float, words_per_cue: int =
     return "\n".join(lines)
 
 
+def _write_words_by_duration(text: str, total_seconds: float, dest: Path,
+                             voice_start: float = 0.0, voice_end: float = None):
+    """words.json del fallback ponderado (mismo reparto que _build_srt_by_duration)."""
+    words = text.split()
+    if not words or total_seconds <= 0:
+        return
+    if voice_end is None or voice_end <= voice_start:
+        voice_end = total_seconds
+    span = voice_end - voice_start
+    if span <= 0:
+        span = total_seconds
+        voice_start = 0.0
+    weights = [max(1, len(w)) for w in words]
+    total_w = sum(weights)
+    result = []
+    acc = 0
+    t_prev = voice_start
+    for w, wt in zip(words, weights):
+        acc += wt
+        t_next = voice_start + (acc / total_w) * span
+        result.append((w, t_prev, t_next))
+        t_prev = t_next
+    _write_words_json(result, dest)
+
+
 def _audio_duration(path: Path) -> float:
     """Duracion del audio en segundos via ffprobe."""
     try:
@@ -467,13 +500,17 @@ async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> P
     #    ortografía del guion. 2) Si Whisper falla, reparto ponderado dentro del
     #    rango de voz detectado. 3) Sin audio aún: edge-tts (más abajo).
     audio_path = project_service.get_layer_path(project_id, "audio")
+    words_path = output_path.parent / "words.json"
     if audio_path.exists():
-        srt = _subtitles_with_whisper(audio_path, script=script, language=lang)
+        srt = _subtitles_with_whisper(audio_path, script=script, language=lang,
+                                      words_out=words_path)
         if not srt:
             dur = _audio_duration(audio_path)
             if dur > 0:
                 v_start, v_end = _voice_range(audio_path, dur)
                 srt = _build_srt_by_duration(script, dur, voice_start=v_start, voice_end=v_end)
+                _write_words_by_duration(script, dur, words_path,
+                                         voice_start=v_start, voice_end=v_end)
         if srt:
             output_path.write_text(srt, encoding="utf-8")
             project_service.update_layer_status(project_id, "subtitles", LayerStatus.ready, {
@@ -988,10 +1025,35 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
     if config.video.source in _CADENCE_SRC and audio_path.exists():
         audio_dur = await _get_audio_duration(audio_path)
         if audio_dur > 0:
-            shot_dur = float(config.video.clip_duration or 4)
-            clips = await _apply_cut_cadence(
-                clips, audio_dur, shot_dur, aspect,
-                Path("projects") / project_id / "video" / "shots")
+            _editing_plan = None
+            _ec = config.editing if hasattr(config, "editing") else None
+            if _ec and hasattr(_ec, "editing_plan") and _ec.editing_plan:
+                _editing_plan = _ec.editing_plan
+
+            if _editing_plan and _editing_plan.get("segments"):
+                from app.services.editing_service import plan_to_shot_durations, build_xfade_chain
+                durations = plan_to_shot_durations(_editing_plan)
+                shots_dir = Path("projects") / project_id / "video" / "shots"
+                all_shots = []
+                for di, dur in enumerate(durations):
+                    one_shot = await _apply_cut_cadence(
+                        clips, dur, dur, aspect, shots_dir)
+                    if one_shot:
+                        all_shots.append(one_shot[0])
+                if all_shots:
+                    xfade_out = shots_dir / "xfade_output.mp4"
+                    xfade_result = await build_xfade_chain(
+                        all_shots, _editing_plan["segments"], xfade_out)
+                    if xfade_result and xfade_result.exists():
+                        clips = [xfade_result]
+                    else:
+                        clips = all_shots
+                log.info(f"Editing plan: {len(durations)} segments, {len(all_shots)} shots")
+            else:
+                shot_dur = float(config.video.clip_duration or 4)
+                clips = await _apply_cut_cadence(
+                    clips, audio_dur, shot_dur, aspect,
+                    Path("projects") / project_id / "video" / "shots")
 
     list_file = Path("projects") / project_id / "video" / "clips.txt"
     list_file.write_text("\n".join(f"file '{c.resolve()}'" for c in clips))
