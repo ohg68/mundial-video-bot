@@ -59,8 +59,10 @@ class VideoLayerConfig(BaseModel):
     # que se toman los clips. Si es None, se usa GDRIVE_VIDEO_FOLDER_ID del entorno.
     gdrive_folder_id: Optional[str] = None
     # A/B split: segmenta el guion y baja 2 visuales (A/B) por escena para que
-    # la imagen siga lo que narra el locutor. Off por defecto (sin cambio de comportamiento).
-    ab_split: bool = False
+    # la imagen siga lo que narra el locutor. On por defecto: sin esto, las tomas
+    # se eligen con 5 keywords genéricas de todo el video y se ordenan al azar,
+    # así que casi nunca coinciden con lo que se está narrando en ese momento.
+    ab_split: bool = True
     scene_count: int = 6
 
 class AudioLayerConfig(BaseModel):

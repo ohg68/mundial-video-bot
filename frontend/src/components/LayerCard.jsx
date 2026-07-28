@@ -230,17 +230,28 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
 
           {/* Video source selector */}
           {layer.key === "video" && (
-            <div className="flex gap-1.5 flex-wrap">
-              {VIDEO_SOURCES.map(src => (
-                <button
-                  key={src.key}
-                  onClick={() => updateConfig({ source: src.key })}
-                  className={`btn-action ${config.source === src.key
-                    ? "bg-blue-50 border-blue-400 text-[#0C447C]" : ""}`}
-                >
-                  {src.label}
-                </button>
-              ))}
+            <div className="space-y-2">
+              <div className="flex gap-1.5 flex-wrap">
+                {VIDEO_SOURCES.map(src => (
+                  <button
+                    key={src.key}
+                    onClick={() => updateConfig({ source: src.key })}
+                    className={`btn-action ${config.source === src.key
+                      ? "bg-blue-50 border-blue-400 text-[#0C447C]" : ""}`}
+                  >
+                    {src.label}
+                  </button>
+                ))}
+              </div>
+              <label className="flex items-center gap-2 text-[11px] text-gray-500 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.ab_split !== false}
+                  onChange={e => updateConfig({ ab_split: e.target.checked })}
+                  className="w-3.5 h-3.5 accent-[#0C447C]"
+                />
+                🎯 Ajustar imágenes al guion (recomendado — si no, elige tomas genéricas al azar)
+              </label>
             </div>
           )}
 

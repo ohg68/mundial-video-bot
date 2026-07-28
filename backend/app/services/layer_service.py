@@ -866,7 +866,13 @@ async def assemble_video_layer(project_id: str, config: ProjectConfig) -> Path:
 
     # A/B split: las imágenes siguen el guion (2 visuales por escena). Requiere el
     # guion ya generado; el orquestador corre script→audio antes que la capa de video.
-    if config.video.ab_split:
+    # Solo tiene sentido con fuentes buscables por keyword (no local/gdrive/youtube,
+    # que no pasan por _fetch_one_clip) — para esas, cae al flujo clásico de abajo.
+    _AB_COMPATIBLE_SOURCES = (
+        VideoSource.pexels, VideoSource.pixabay, VideoSource.coverr, VideoSource.mixed,
+        VideoSource.stock, VideoSource.photos, VideoSource.mixed_photos,
+    )
+    if config.video.ab_split and config.video.source in _AB_COMPATIBLE_SOURCES:
         return await assemble_video_layer_ab(project_id, config)
 
     project_service.update_layer_status(project_id, "video", LayerStatus.pending)
@@ -1180,8 +1186,8 @@ async def _assemble_from_user_clips(project_id: str, config: ProjectConfig,
 
 
 async def _fetch_one_clip(query: str, dest_dir: Path, duration: float, aspect: str,
-                          use_photos: bool) -> Path:
-    """Devuelve UN clip para `query` (foto Ken Burns o clip de Pexels). None si nada
+                          use_photos: bool, source: "VideoSource" = None) -> Path:
+    """Devuelve UN clip para `query` (foto Ken Burns o clip de stock). None si nada
     o si falla (para no tumbar el ensamblaje: el caller cae a sus fallbacks)."""
     try:
         if use_photos:
@@ -1189,10 +1195,19 @@ async def _fetch_one_clip(query: str, dest_dir: Path, duration: float, aspect: s
                 query=query, dest_dir=dest_dir, count=1, duration=duration, aspect=aspect,
             )
             return clips[0] if clips else None
-        # Fuente de video (Pexels): pedimos varias y tomamos la 1ª que descargue bien
-        urls = await fetch_pexels_clips(query, count=3)
-        downloaded = await _download_clips(urls, dest_dir, "pex")
-        return downloaded[0] if downloaded else None
+        # Banco(s) de video según la fuente elegida en el proyecto. Antes esto
+        # ignoraba `source` y siempre pegaba a Pexels — si el usuario elegía
+        # Pixabay/Coverr, el A/B split los buscaba igual en Pexels.
+        fetchers = {
+            VideoSource.pixabay: [fetch_pixabay_clips],
+            VideoSource.coverr: [fetch_coverr_clips],
+        }.get(source, [fetch_pexels_clips, fetch_pixabay_clips])
+        for i, fetch_fn in enumerate(fetchers):
+            urls = await fetch_fn(query, count=3)
+            downloaded = await _download_clips(urls, dest_dir, f"src{i}")
+            if downloaded:
+                return downloaded[0]
+        return None
     except Exception as e:
         log.warning(f"_fetch_one_clip falló para {query!r}: {e}")
         return None
@@ -1243,10 +1258,10 @@ async def assemble_video_layer_ab(project_id: str, config: ProjectConfig) -> Pat
         for slot, key in (("a", "visual_1"), ("b", "visual_2")):
             query = scene.get(key) or scene.get("visual_1") or config.topic
             slot_dir = ab_dir / f"s{i:02d}_{slot}"
-            clip = await _fetch_one_clip(query, slot_dir, clip_dur, aspect, use_photos)
+            clip = await _fetch_one_clip(query, slot_dir, clip_dur, aspect, use_photos, config.video.source)
             # Fallbacks: keyword del tema → reusar el último clip que sí salió
             if clip is None:
-                clip = await _fetch_one_clip(config.topic, slot_dir, clip_dur, aspect, use_photos)
+                clip = await _fetch_one_clip(config.topic, slot_dir, clip_dur, aspect, use_photos, config.video.source)
             if clip is None and clips:
                 clip = clips[-1]
             if clip is not None:
