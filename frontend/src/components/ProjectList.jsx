@@ -16,7 +16,7 @@ const CATEGORIES = [
 ]
 
 export default function ProjectList({
-  projects, selected, onSelect, onNew, onDeleted, onRefresh,
+  projects, selected, onSelect, onNew, onOpenLibrary, onDeleted, onRefresh,
   categoryFilter, onCategoryFilter,
 }) {
   const [bulkMode, setBulkMode] = useState(false)
@@ -84,9 +84,12 @@ export default function ProjectList({
         </button>
       </div>
 
-      <div className="px-4 pb-3">
-        <button onClick={onNew} className="btn-primary w-full py-2 text-[13px]">
+      <div className="px-4 pb-3 flex gap-1.5">
+        <button onClick={onNew} className="btn-primary flex-1 py-2 text-[13px]">
           + Nuevo vídeo
+        </button>
+        <button onClick={onOpenLibrary} className="btn-outline py-2 px-2.5 text-[13px]" title="Biblioteca de vídeos">
+          📚
         </button>
       </div>
 

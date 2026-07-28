@@ -3,6 +3,7 @@ import ProjectList from "./components/ProjectList"
 import ProjectEditor from "./components/ProjectEditor"
 import NewProjectModal from "./components/NewProjectModal"
 import BottomNav from "./components/BottomNav"
+import MediaLibrary from "./components/MediaLibrary"
 import { apiJson } from "./api"
 
 // Uso personal: sin login. Si en el futuro se vuelve multiusuario, se
@@ -11,6 +12,7 @@ export default function App() {
   const [projects, setProjects] = useState([])
   const [selected, setSelected] = useState(null)
   const [showNew, setShowNew] = useState(false)
+  const [showLibrary, setShowLibrary] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [mobileTab, setMobileTab] = useState("projects")
   const [categoryFilter, setCategoryFilter] = useState("")
@@ -71,6 +73,7 @@ export default function App() {
           selected={selected}
           onSelect={handleSelect}
           onNew={() => setShowNew(true)}
+          onOpenLibrary={() => setShowLibrary(true)}
           onDeleted={handleDeleted}
           onRefresh={fetchProjects}
           categoryFilter={categoryFilter}
@@ -101,6 +104,10 @@ export default function App() {
 
       {showNew && (
         <NewProjectModal onCreated={handleCreated} onClose={() => setShowNew(false)} />
+      )}
+
+      {showLibrary && (
+        <MediaLibrary mode="global" onClose={() => setShowLibrary(false)} />
       )}
     </div>
   )
