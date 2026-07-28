@@ -207,25 +207,23 @@ async def _execute_tool(project_id: str, name: str, tool_input: dict) -> str:
             return "Error: proyecto no encontrado."
         return json.dumps(_summarize_state(meta), ensure_ascii=False)
 
-    if name == "update_video_config":
-        project_service.update_project_config(project_id, {"video": tool_input})
-        return f"Config de video actualizada: {tool_input}"
-
-    if name == "update_audio_config":
-        project_service.update_project_config(project_id, {"audio": tool_input})
-        return f"Config de audio actualizada: {tool_input}"
-
-    if name == "update_music_config":
-        project_service.update_project_config(project_id, {"music": tool_input})
-        return f"Config de música actualizada: {tool_input}"
-
-    if name == "update_subtitles_config":
-        project_service.update_project_config(project_id, {"subtitles": tool_input})
-        return f"Config de subtítulos actualizada: {tool_input}"
-
-    if name == "update_overlay_config":
-        project_service.update_project_config(project_id, {"overlay": tool_input})
-        return f"Config de overlay actualizada: {tool_input}"
+    _LAYER_CONFIG_TOOLS = {
+        "update_video_config": "video",
+        "update_audio_config": "audio",
+        "update_music_config": "music",
+        "update_subtitles_config": "subtitles",
+        "update_overlay_config": "overlay",
+    }
+    if name in _LAYER_CONFIG_TOOLS:
+        layer = _LAYER_CONFIG_TOOLS[name]
+        meta = project_service.get_project(project_id)
+        if not meta:
+            return "Error: proyecto no encontrado."
+        # Merge, no reemplazo: no perder campos que la tool no tocó (ej. si
+        # solo cambiás volumen, no borrar fade_in/fade_out ya seteados).
+        merged = {**meta["config"].get(layer, {}), **tool_input}
+        project_service.update_project_config(project_id, {layer: merged})
+        return f"Config de {layer} actualizada: {tool_input}"
 
     if name == "regenerate_layer":
         layer = tool_input.get("layer")
