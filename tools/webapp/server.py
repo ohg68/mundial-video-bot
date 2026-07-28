@@ -42,6 +42,40 @@ def _run_download(job_id: str, url: str):
         JOBS[job_id] = {"status": "error", "url": url, "file": None, "error": str(e)[:500]}
 
 
+def _probe_duration(path: Path) -> float:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        return float(out.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def _trim_clip(src: Path, dest: Path, start: float, end: float) -> tuple[bool, str]:
+    """Recorta [start,end) de `src` a `dest`. Intenta stream-copy primero
+    (rápido, sin recodificar); si el códec de origen no es compatible con el
+    contenedor de salida, recodifica como fallback."""
+    duration = max(0.0, end - start)
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
+         "-c", "copy", str(dest)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+        return True, ""
+
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
+         "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-c:a", "aac", str(dest)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+        return True, ""
+    return False, proc.stderr[-500:] or "ffmpeg falló al recortar"
+
+
 INDEX_HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <title>LayerCut Downloader</title>
@@ -62,6 +96,22 @@ INDEX_HTML = """<!doctype html>
   #files button.secondary { background: #fff; color: #0C447C; border: 1px solid #ccc; }
   #player { margin-top: 16px; display: none; }
   #player video { width: 100%; border-radius: 8px; background: #000; }
+  #editor { margin-top: 16px; display: none; border: 1px solid #eee; border-radius: 10px; padding: 14px; }
+  #editor video { width: 100%; max-height: 280px; border-radius: 8px; background: #000; margin-bottom: 10px; }
+  .slider-wrap { position: relative; height: 24px; margin-bottom: 8px; }
+  /* Slider de doble handle: dos <input type=range> superpuestos ocupando
+     el 100% del ancho. Sin esto, el que queda arriba en el DOM captura
+     todos los clicks en toda la franja y el otro handle queda inalcanzable
+     con el mouse (bug real encontrado y corregido en la app principal). */
+  .dual-range { position: absolute; width: 100%; margin: 0; top: 4px; pointer-events: none; }
+  .dual-range::-webkit-slider-thumb { pointer-events: auto; }
+  .dual-range::-moz-range-thumb { pointer-events: auto; }
+  #editorTimes { display: flex; justify-content: space-between; font-size: 12px; color: #555; margin-bottom: 8px; }
+  #editorHint { font-size: 11px; color: #999; margin-bottom: 10px; }
+  #editorError { font-size: 12px; color: #c0392b; margin-bottom: 8px; }
+  .editor-actions { display: flex; gap: 8px; }
+  .editor-actions button { flex: 1; margin: 0; }
+  #editor .btn-secondary { background: #fff; color: #0C447C; border: 1px solid #ccc; }
 </style></head>
 <body>
   <h1>🎬 LayerCut Downloader</h1>
@@ -70,6 +120,24 @@ INDEX_HTML = """<!doctype html>
   <button id="go" onclick="startDownload()">Descargar</button>
   <div id="status"></div>
   <div id="player"><video id="video" controls></video></div>
+  <div id="editor">
+    <video id="editorVideo" controls></video>
+    <div class="slider-wrap">
+      <input id="rangeStart" class="dual-range" type="range" min="0" max="0" step="0.1" value="0" oninput="onRangeChange()">
+      <input id="rangeEnd" class="dual-range" type="range" min="0" max="0" step="0.1" value="0" oninput="onRangeChange()">
+    </div>
+    <div id="editorTimes">
+      <span>IN: <b id="inTime">0:00.0</b></span>
+      <span>Duración: <b id="selDuration">0:00.0</b></span>
+      <span>OUT: <b id="outTime">0:00.0</b></span>
+    </div>
+    <div id="editorHint">El recorte puede variar ±1-2s por limitaciones de codificación (cae en el fotograma clave más cercano).</div>
+    <div id="editorError"></div>
+    <div class="editor-actions">
+      <button class="btn-secondary" onclick="previewSelection()">▶ Previsualizar tramo</button>
+      <button onclick="confirmTrim()">✂ Confirmar recorte</button>
+    </div>
+  </div>
   <div id="files"></div>
 <script>
 async function refreshFiles() {
@@ -81,6 +149,7 @@ async function refreshFiles() {
         const n = f.replace(/'/g, "\\'");
         return `<div class="row"><span>📄 ${f}</span>
           <button onclick="play('${n}')">▶ Ver</button>
+          <button class="secondary" onclick="openEditor('${n}')">✂ Editar</button>
           <button class="secondary" onclick="reveal('${n}')">📁 Ubicación</button>
           <button class="danger" onclick="del('${n}')">🗑 Borrar</button></div>`;
       }).join('')
@@ -93,6 +162,80 @@ function play(name) {
   player.style.display = 'block';
   video.play().catch(() => {});
   player.scrollIntoView({behavior: 'smooth'});
+}
+
+let editorFile = null;
+let editorPreviewing = false;
+
+function formatTime(s) {
+  if (!isFinite(s)) return '0:00.0';
+  const m = Math.floor(s / 60);
+  const sec = (s % 60).toFixed(1);
+  return m + ':' + sec.padStart(4, '0');
+}
+
+async function openEditor(name) {
+  editorFile = name;
+  document.getElementById('player').style.display = 'none';
+  document.getElementById('editorError').textContent = '';
+  const r = await fetch('/api/duration/' + encodeURIComponent(name));
+  const data = await r.json();
+  const duration = data.duration || 0;
+  const rs = document.getElementById('rangeStart');
+  const re = document.getElementById('rangeEnd');
+  rs.max = re.max = duration;
+  rs.value = 0;
+  re.value = duration;
+  const ev = document.getElementById('editorVideo');
+  ev.src = '/files/' + encodeURIComponent(name);
+  ev.onended = () => { editorPreviewing = false; };
+  ev.ontimeupdate = () => {
+    if (editorPreviewing && ev.currentTime >= Number(re.value)) {
+      ev.pause();
+      editorPreviewing = false;
+    }
+  };
+  onRangeChange();
+  document.getElementById('editor').style.display = 'block';
+  document.getElementById('editor').scrollIntoView({behavior: 'smooth'});
+}
+
+function onRangeChange() {
+  const rs = document.getElementById('rangeStart');
+  const re = document.getElementById('rangeEnd');
+  let start = Number(rs.value);
+  let end = Number(re.value);
+  if (start > end - 0.1) { start = Math.max(0, end - 0.1); rs.value = start; }
+  document.getElementById('inTime').textContent = formatTime(start);
+  document.getElementById('outTime').textContent = formatTime(end);
+  document.getElementById('selDuration').textContent = formatTime(Math.max(0, end - start));
+}
+
+function previewSelection() {
+  const ev = document.getElementById('editorVideo');
+  const start = Number(document.getElementById('rangeStart').value);
+  ev.currentTime = start;
+  ev.play().catch(() => {});
+  editorPreviewing = true;
+}
+
+async function confirmTrim() {
+  const start = Number(document.getElementById('rangeStart').value);
+  const end = Number(document.getElementById('rangeEnd').value);
+  const errEl = document.getElementById('editorError');
+  errEl.textContent = '⏳ Recortando...';
+  const r = await fetch('/api/trim', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: editorFile, start, end}),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    errEl.textContent = '❌ ' + (data.error || 'No se pudo recortar');
+    return;
+  }
+  errEl.textContent = '';
+  document.getElementById('editor').style.display = 'none';
+  refreshFiles();
 }
 async function reveal(name) {
   await fetch('/api/reveal/' + encodeURIComponent(name), {method: 'POST'});
@@ -163,6 +306,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/status/"):
             job_id = self.path.rsplit("/", 1)[-1]
             return self._json(JOBS.get(job_id, {"status": "error", "error": "job no encontrado"}))
+        if self.path.startswith("/api/duration/"):
+            path = self._resolve_safe(self.path[len("/api/duration/"):])
+            if path is None:
+                return self._json({"error": "Archivo no encontrado"}, 404)
+            return self._json({"duration": _probe_duration(path)})
         if self.path.startswith("/files/"):
             return self._serve_file(self.path[len("/files/"):])
         if self.path == "/" or self.path == "/index.html":
@@ -244,6 +392,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "Archivo no encontrado"}, 404)
             subprocess.run(["open", "-R", str(path)])
             return self._json({"ok": True})
+        if self.path == "/api/trim":
+            length = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(length) or b"{}")
+            src = self._resolve_safe(data.get("name") or "")
+            if src is None:
+                return self._json({"error": "Archivo no encontrado"}, 404)
+            try:
+                start = float(data.get("start"))
+                end = float(data.get("end"))
+            except (TypeError, ValueError):
+                return self._json({"error": "start/end deben ser números"}, 400)
+            if start < 0 or end <= start:
+                return self._json({"error": "Rango de recorte inválido"}, 400)
+            dest = src.with_name(f"{src.stem} (recorte {start:.1f}-{end:.1f}s){src.suffix}")
+            ok, err = _trim_clip(src, dest, start, end)
+            if not ok:
+                return self._json({"error": err}, 500)
+            return self._json({"ok": True, "file": dest.name})
         self.send_response(404)
         self.end_headers()
 
