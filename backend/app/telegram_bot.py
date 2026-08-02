@@ -90,7 +90,7 @@ def _owns(project_id: str, chat_id: int):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool = False,
+def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool = True,
                   gdrive_folder_id: str = None, language: str = "es") -> ProjectConfig:
     from app.services.layer_service import LANG_INFO
     voice_name = LANG_INFO.get(language, LANG_INFO["es"])[1]
@@ -563,7 +563,6 @@ def _source_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🎬 Video Clips (Pexels)", callback_data="src_pexels")],
         [InlineKeyboardButton("🎞️ Máxima variedad (todos los bancos)", callback_data="src_stock")],
         [InlineKeyboardButton("🔀 Mix Fotos + Video", callback_data="src_mixed_photos")],
-        [InlineKeyboardButton("🎯 A/B guiado (imágenes siguen el guion)", callback_data="src_ab")],
     ]
     from app.services import gdrive_service
     if gdrive_service.is_configured():
@@ -629,14 +628,17 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_GDRIVE_FOLDER
 
     # ab_split=True hace que las imágenes sigan el guion (2 visuales por escena).
+    # Va activado en todas las fuentes buscables por keyword: sin esto se eligen
+    # 5 keywords genéricas para todo el video y las tomas se barajan al azar, así
+    # que casi nunca coinciden con lo que se narra en ese momento. Wikimedia no lo
+    # soporta (no pasa por _fetch_one_clip), así que queda en False.
     src_map = {
-        "src_photos": ("photos", "📷 Fotos de Internet", False),
-        "src_pexels": ("pexels", "🎬 Video Clips Pexels", False),
-        "src_mixed_photos": ("mixed_photos", "🔀 Mix Fotos + Video", False),
-        "src_ab": ("photos", "🎯 A/B guiado por guion", True),
-        "src_pixabay": ("pixabay", "🎞️ Video Clips Pixabay", False),
-        "src_coverr": ("coverr", "🎬 Video Clips Coverr", False),
-        "src_stock": ("stock", "🎞️ Máxima variedad (todos los bancos)", False),
+        "src_photos": ("photos", "📷 Fotos de Internet", True),
+        "src_pexels": ("pexels", "🎬 Video Clips Pexels", True),
+        "src_mixed_photos": ("mixed_photos", "🔀 Mix Fotos + Video", True),
+        "src_pixabay": ("pixabay", "🎞️ Video Clips Pixabay", True),
+        "src_coverr": ("coverr", "🎬 Video Clips Coverr", True),
+        "src_stock": ("stock", "🎞️ Máxima variedad (todos los bancos)", True),
         "src_wiki": ("wikimedia", "🏛️ Wikimedia (histórico/libre)", False),
     }
     source, label, ab_split = src_map.get(query.data, ("pexels", "🎬 Video Clips Pexels", False))
@@ -1350,8 +1352,7 @@ async def on_edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🎬 Pexels", callback_data=f"chsrc_px_{project_id}")],
         [InlineKeyboardButton("🎞️ Máxima variedad", callback_data=f"chsrc_st_{project_id}"),
          InlineKeyboardButton("🏛️ Wikimedia", callback_data=f"chsrc_wk_{project_id}")],
-        [InlineKeyboardButton("🔀 Mix", callback_data=f"chsrc_mx_{project_id}"),
-         InlineKeyboardButton("🎯 A/B guiado", callback_data=f"chsrc_ab_{project_id}")],
+        [InlineKeyboardButton("🔀 Mix", callback_data=f"chsrc_mx_{project_id}")],
     ]
     from app.services import gdrive_service
     if gdrive_service.is_configured():
@@ -1399,7 +1400,9 @@ async def on_change_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     source = _SRC_CODES.get(code, "pexels")
-    ab_split = (code == "ab")
+    # Igual que en la creación: las imágenes siguen el guion salvo en wikimedia,
+    # que no pasa por el flujo A/B.
+    ab_split = source != "wikimedia"
     config = _apply_video_source(project_id, meta, source=source, ab_split=ab_split)
     await query.edit_message_text(f"🎬 Fuente cambiada — regenerando video con *{source}*...", parse_mode="Markdown")
     asyncio.create_task(_regen_layer(context.application.bot, chat_id, project_id, "video", config))
