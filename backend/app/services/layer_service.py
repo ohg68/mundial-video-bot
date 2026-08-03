@@ -1249,7 +1249,10 @@ async def assemble_video_layer_ab(project_id: str, config: ProjectConfig) -> Pat
     if audio_path.exists() and total_slots > 0:
         audio_dur = await _get_audio_duration(audio_path)
         if audio_dur > 0:
-            clip_dur = round(audio_dur / total_slots, 2)
+            # Clamp: con narraciones cortas el reparto puede dar fracciones de
+            # segundo (cortes epilépticos) y con narraciones largas, tomas
+            # eternas. El render final recorta al audio de todas formas.
+            clip_dur = max(1.2, min(6.0, round(audio_dur / total_slots, 2)))
 
     # 3) Por cada escena, bajar visual_1 (A) y visual_2 (B) en orden
     ab_dir = Path("projects") / project_id / "video" / "ab"
@@ -1273,19 +1276,52 @@ async def assemble_video_layer_ab(project_id: str, config: ProjectConfig) -> Pat
         })
         return None
 
-    # 4) Concatenar en orden y normalizar a la resolución del aspecto
+    # 4) Normalizar cada clip a su slot ANTES de concatenar. Dos motivos:
+    #    - Los clips de banco se bajan enteros (10-60s): sin recortar a clip_dur
+    #      el video termina durando mucho más que la narración.
+    #    - fps=30 CFR: vienen a fps distintos y el concat demuxer rompe los
+    #      timestamps si no se homogeneizan (duración inflada a horas).
+    #    Mismo patrón ya probado en _assemble_from_user_clips.
+    w, h = (1080, 1920) if aspect == "9:16" else (1920, 1080)
+    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30,setsar=1"
+    norm_dir = ab_dir / "normalized"
+    norm_dir.mkdir(parents=True, exist_ok=True)
+
+    norm_clips: list[Path] = []
+    for i, src in enumerate(clips):
+        seg = norm_dir / f"seg_{i:03d}.mp4"
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(src),
+            "-t", f"{clip_dur:.3f}",
+            "-vf", vf, "-r", "30",
+            "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+            "-pix_fmt", "yuv420p", "-an",
+            str(seg),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if seg.exists() and seg.stat().st_size > 0:
+            norm_clips.append(seg)
+        else:
+            log.warning(f"A/B: no se pudo normalizar {src.name}: {stderr.decode()[-200:]}")
+
+    if not norm_clips:
+        project_service.update_layer_status(project_id, "video", LayerStatus.error, {
+            "error": "No se pudo normalizar ningún clip del A/B split.",
+        })
+        return None
+
+    # 5) Concatenar los segmentos ya homogéneos (stream-copy, sin recodificar)
     list_file = ab_dir / "clips.txt"
     list_file.parent.mkdir(parents=True, exist_ok=True)
-    list_file.write_text("\n".join(f"file '{c.resolve()}'" for c in clips))
+    list_file.write_text("\n".join(f"file '{c.resolve()}'" for c in norm_clips))
 
-    w, h = (1080, 1920) if aspect == "9:16" else (1920, 1080)
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
         "-i", str(list_file),
-        "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
-        "-c:v", "libx264", "-crf", "23",
-        "-an",
+        "-c", "copy",
+        "-movflags", "+faststart",
         str(output_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -1293,7 +1329,7 @@ async def assemble_video_layer_ab(project_id: str, config: ProjectConfig) -> Pat
     await proc.communicate()
 
     project_service.update_layer_status(project_id, "video", LayerStatus.ready, {
-        "clips": len(clips),
+        "clips": len(norm_clips),
         "source": config.video.source,
         "ab_split": True,
         "scene_count": len(scenes),
