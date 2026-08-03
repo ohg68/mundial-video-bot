@@ -1249,10 +1249,11 @@ async def assemble_video_layer_ab(project_id: str, config: ProjectConfig) -> Pat
     if audio_path.exists() and total_slots > 0:
         audio_dur = await _get_audio_duration(audio_path)
         if audio_dur > 0:
-            # Clamp: con narraciones cortas el reparto puede dar fracciones de
-            # segundo (cortes epilépticos) y con narraciones largas, tomas
-            # eternas. El render final recorta al audio de todas formas.
-            clip_dur = max(1.2, min(6.0, round(audio_dur / total_slots, 2)))
+            # Solo piso, sin techo: el render final usa -shortest, así que si el
+            # video queda más corto que la narración se trunca el final del guion.
+            # El piso evita cortes de fracciones de segundo en narraciones muy
+            # cortas; para tomas más ágiles hay que subir scene_count, no recortar.
+            clip_dur = max(1.2, round(audio_dur / total_slots, 2))
 
     # 3) Por cada escena, bajar visual_1 (A) y visual_2 (B) en orden
     ab_dir = Path("projects") / project_id / "video" / "ab"
