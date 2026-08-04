@@ -125,25 +125,30 @@ async def delete_history_render(project_id: str, filename: str):
 
 @router.get("/{project_id}/durations")
 async def get_layer_durations(project_id: str):
+    # mtime: permite al frontend detectar que el render quedó viejo (alguna capa
+    # se regeneró después del último final.mp4).
     layers = {}
     for layer_key, layer_file in project_service.LAYER_FILES.items():
         path = PROJECTS_DIR / project_id / layer_key / layer_file
         if path.exists():
-            dur = await _ffprobe_duration(path)
+            stat = path.stat()
             layers[layer_key] = {
-                "duration": dur,
+                "duration": await _ffprobe_duration(path),
                 "exists": True,
-                "size_bytes": path.stat().st_size,
+                "size_bytes": stat.st_size,
+                "mtime": stat.st_mtime,
             }
         else:
-            layers[layer_key] = {"duration": 0, "exists": False, "size_bytes": 0}
+            layers[layer_key] = {"duration": 0, "exists": False, "size_bytes": 0, "mtime": 0}
 
     output_path = PROJECTS_DIR / project_id / "output" / "final.mp4"
     if output_path.exists():
+        stat = output_path.stat()
         layers["output"] = {
             "duration": await _ffprobe_duration(output_path),
             "exists": True,
-            "size_bytes": output_path.stat().st_size,
+            "size_bytes": stat.st_size,
+            "mtime": stat.st_mtime,
         }
 
     return {"layers": layers}

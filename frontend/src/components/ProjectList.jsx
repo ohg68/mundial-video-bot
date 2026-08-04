@@ -5,6 +5,9 @@ const STATUS_COLOR = {
   ready: "bg-emerald-500", pending: "bg-amber-400", empty: "bg-gray-200", error: "bg-red-500"
 }
 
+// Mismas capas necesarias que usa ProjectEditor para su contador.
+const REQUIRED_KEYS = ["video", "audio", "subtitles"]
+
 const CATEGORIES = [
   "Marketing / Promoción",
   "Educación / Tutorial",
@@ -139,8 +142,9 @@ export default function ProjectList({
           </div>
         )}
         {projects.map(p => {
-          const layerStatuses = Object.values(p.layers || {})
-          const allReady = layerStatuses.filter(s => s === "ready").length
+          // Solo las necesarias: música y overlay son opcionales, contarlas
+          // hacía que un proyecto terminado se viera como incompleto (3/5).
+          const requiredReady = REQUIRED_KEYS.filter(k => p.layers?.[k] === "ready").length
           const isSelected = selected?.id === p.id
           return (
             <div
@@ -183,7 +187,7 @@ export default function ProjectList({
                       title={`${layer}: ${status}`}
                     />
                   ))}
-                  <span className="text-[10.5px] text-gray-400 ml-1">{allReady}/5</span>
+                  <span className="text-[10.5px] text-gray-400 ml-1">{requiredReady}/{REQUIRED_KEYS.length}</span>
                 </div>
               </div>
             </div>

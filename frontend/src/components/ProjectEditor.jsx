@@ -19,6 +19,12 @@ const LAYERS = [
   { key: "overlay",   label: "Overlay / branding", color: "#712B13", bg: "#FAECE7", icon: "🏷" },
 ]
 
+// Necesarias para que el vídeo tenga sentido; el resto son añadidos. Se muestran
+// por separado para que "sin configurar" en música no se lea como algo que falta.
+const REQUIRED_KEYS = ["video", "audio", "subtitles"]
+const REQUIRED_LAYERS = LAYERS.filter(l => REQUIRED_KEYS.includes(l.key))
+const OPTIONAL_LAYERS = LAYERS.filter(l => !REQUIRED_KEYS.includes(l.key))
+
 export default function ProjectEditor({ project: initialProject, onRefresh, onMenuOpen, mobileTab }) {
   const [project, setProject] = useState(initialProject)
   const [rendering, setRendering] = useState(false)
@@ -83,6 +89,11 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
     }, 5000)
   }
 
+  const handleLayerUpdate = () => {
+    apiJson(`/api/projects/${project.id}`).then(d => { if (d.id) setProject(d) })
+    fetchDurations()
+  }
+
   const handleClearRenders = async () => {
     if (!confirm("¿Limpiar todos los renders de este proyecto?")) return
     await apiJson(`/api/projects/${project.id}/renders`, { method: "DELETE" })
@@ -90,6 +101,16 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
   }
 
   const readyCount = Object.values(project.layers || {}).filter(s => s === "ready").length
+  const requiredReady = REQUIRED_KEYS.filter(k => project.layers?.[k] === "ready").length
+  const canRender = readyCount >= 2
+
+  // El render queda "viejo" si alguna capa se regeneró después del final.mp4.
+  // Margen de 2s para no marcarlo por el desfase natural del propio render.
+  const outputInfo = layerDurations?.output
+  const isStale = !!outputInfo?.exists && LAYERS.some(l => {
+    const info = layerDurations?.[l.key]
+    return info?.exists && (info.mtime || 0) > (outputInfo.mtime || 0) + 2
+  })
 
   // Mobile preview tab
   if (mobileTab === "preview") {
@@ -103,7 +124,7 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
   }
 
   return (
-    <div className="p-4 md:p-7 max-w-[760px]">
+    <div className="p-4 md:p-7 max-w-[1200px]">
       {/* Header */}
       <div className="flex items-start justify-between mb-4 gap-3">
         <div className="min-w-0">
@@ -140,30 +161,6 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
         </button>
       </div>
 
-      {/* Render buttons */}
-      <div className="flex gap-2 mb-4 flex-wrap">
-        <button
-          onClick={() => handleRender("quick")}
-          disabled={rendering || readyCount < 2}
-          className={`px-3.5 py-1.5 rounded-lg border text-[13px] cursor-pointer transition-colors
-            ${readyCount >= 2
-              ? "bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100"
-              : "bg-gray-100 text-gray-400 border-gray-100 cursor-not-allowed"}`}
-        >
-          {rendering ? "⏳" : "⚡"} Preview 540p
-        </button>
-        <button
-          onClick={() => handleRender("full")}
-          disabled={rendering || readyCount < 2}
-          className={`px-4 py-1.5 rounded-lg border-none text-[13px] font-medium cursor-pointer transition-colors shadow-sm
-            ${readyCount >= 2
-              ? "bg-[#185FA5] text-white hover:bg-[#0C447C]"
-              : "bg-gray-100 text-gray-400 cursor-not-allowed"}`}
-        >
-          {rendering ? "⏳ Renderizando..." : "▶ Render full"}
-        </button>
-      </div>
-
       {/* WebSocket progress bar */}
       {isRunning && progress !== null && (
         <div className="mb-4 rounded-lg bg-blue-50 border border-blue-200 p-3">
@@ -186,57 +183,133 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
         </div>
       )}
 
-      {/* Video preview + Timeline */}
-      <VideoPreview projectId={project.id} layers={layerDurations} />
-      <Timeline layers={layerDurations} />
+      {/* Dos columnas: lo que configurás (capas) | lo que obtenés (resultado).
+          En móvil se apilan con el resultado arriba — ahí lo normal es mirar,
+          no configurar. */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,400px)] items-start">
 
-      {/* Output card — revisión amigable del video ya renderizado */}
-      {outputUrl && (
-        <div className="bg-green-50 border border-green-400 rounded-xl p-4 mb-3">
-          <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
-            <div>
-              <div className="font-medium text-sm text-green-900">✅ Tu video está listo</div>
-              <div className="text-xs text-green-700">¿Te gusta cómo quedó, o querés cambiar algo?</div>
+        {/* Capas */}
+        <div className="order-2 lg:order-1">
+          <div className="text-[11px] text-gray-400 mb-1.5">
+            Capas · {requiredReady} de {REQUIRED_KEYS.length} necesarias
+          </div>
+          {REQUIRED_LAYERS.map(layer => (
+            <LayerCard
+              key={layer.key}
+              projectId={project.id}
+              layer={layer}
+              status={project.layers?.[layer.key] || "empty"}
+              config={project.config?.[layer.key] || {}}
+              layerInfo={project.layer_info?.[layer.key]}
+              script={project.config?.script}
+              onUpdate={handleLayerUpdate}
+            />
+          ))}
+
+          <div className="text-[11px] text-gray-400 mt-4 mb-1.5">Opcionales</div>
+          {OPTIONAL_LAYERS.map(layer => (
+            <LayerCard
+              key={layer.key}
+              projectId={project.id}
+              layer={layer}
+              status={project.layers?.[layer.key] || "empty"}
+              config={project.config?.[layer.key] || {}}
+              layerInfo={project.layer_info?.[layer.key]}
+              script={project.config?.script}
+              onUpdate={handleLayerUpdate}
+              optional
+            />
+          ))}
+
+          <div className="mt-4">
+            <VideoPreview projectId={project.id} layers={layerDurations} showOutput={false} />
+            <Timeline layers={layerDurations} />
+          </div>
+        </div>
+
+        {/* Resultado */}
+        <div className="order-1 lg:order-2 lg:sticky lg:top-4">
+          <div className="text-[11px] text-gray-400 mb-1.5">Resultado</div>
+
+          {outputUrl ? (
+            <div className={`rounded-xl overflow-hidden border ${isStale ? "border-amber-300" : "border-gray-200"} bg-white`}>
+              <video
+                key={outputUrl}
+                src={outputUrl}
+                controls
+                className="w-full max-h-[380px] bg-black block"
+              />
+
+              {isStale && (
+                <div className="bg-amber-50 border-t border-amber-200 px-3 py-2 text-[12px] text-amber-800 flex gap-1.5">
+                  <span aria-hidden="true">⚠️</span>
+                  <span>Cambiaste una capa después de renderizar. Este resultado está viejo.</span>
+                </div>
+              )}
+
+              <div className="p-2.5">
+                <button
+                  onClick={() => handleRender("full")}
+                  disabled={rendering || !canRender}
+                  className={`w-full py-2 rounded-lg text-[13px] font-medium cursor-pointer transition-colors mb-1.5 border
+                    ${!canRender || rendering
+                      ? "bg-gray-100 text-gray-400 border-gray-100 cursor-not-allowed"
+                      : isStale
+                        ? "bg-amber-500 text-white border-amber-500 hover:bg-amber-600"
+                        : "bg-[#185FA5] text-white border-[#185FA5] hover:bg-[#0C447C]"}`}
+                >
+                  {rendering ? "⏳ Renderizando..." : isStale ? "🔄 Volver a renderizar" : "▶ Renderizar de nuevo"}
+                </button>
+
+                <div className="flex gap-1.5 mb-1.5">
+                  <a href={outputUrl} download title="Descargar"
+                    className="flex-1 text-center py-1.5 rounded-lg border border-gray-200 text-[13px] no-underline text-gray-600 hover:bg-gray-50">⬇</a>
+                  <button onClick={() => setShowPublish(true)} title="Publicar"
+                    className="flex-1 py-1.5 rounded-lg border border-gray-200 bg-white text-[13px] cursor-pointer text-gray-600 hover:bg-gray-50">📤</button>
+                  <button onClick={() => setShowHistory(true)} title="Historial"
+                    className="flex-1 py-1.5 rounded-lg border border-gray-200 bg-white text-[13px] cursor-pointer text-gray-600 hover:bg-gray-50">📂</button>
+                </div>
+
+                <button
+                  onClick={() => { setAssistantReviewMode(true); setShowAssistant(true) }}
+                  className="w-full py-1.5 rounded-lg border border-gray-200 bg-white text-[12px] cursor-pointer text-gray-600 hover:bg-gray-50"
+                >
+                  💬 Pedir cambios
+                </button>
+              </div>
             </div>
-            <div className="flex gap-2">
-              <a href={outputUrl} download className="btn-outline no-underline text-[13px]">⬇ Descargar</a>
-              <button onClick={() => setShowPublish(true)} className="btn-outline">
-                📤 Publicar
+          ) : (
+            <div className="rounded-xl border border-dashed border-gray-300 bg-white p-6 text-center">
+              <div className="text-2xl mb-2">🎬</div>
+              <p className="text-[13px] text-gray-500 m-0">Todavía no renderizaste</p>
+              <p className="text-[11px] text-gray-400 mt-1 mb-3">
+                {canRender ? "Ya podés generar el vídeo final." : "Generá al menos el vídeo y la narración."}
+              </p>
+              <button
+                onClick={() => handleRender("full")}
+                disabled={rendering || !canRender}
+                className={`w-full py-2 rounded-lg text-[13px] font-medium cursor-pointer transition-colors border
+                  ${canRender && !rendering
+                    ? "bg-[#185FA5] text-white border-[#185FA5] hover:bg-[#0C447C]"
+                    : "bg-gray-100 text-gray-400 border-gray-100 cursor-not-allowed"}`}
+              >
+                {rendering ? "⏳ Renderizando..." : "▶ Renderizar"}
               </button>
             </div>
-          </div>
-          <video
-            key={outputUrl}
-            src={outputUrl}
-            controls
-            className="w-full max-h-[400px] rounded-lg bg-black mb-3"
-          />
+          )}
+
           <button
-            onClick={() => { setAssistantReviewMode(true); setShowAssistant(true) }}
-            className="w-full py-2.5 rounded-lg border-none text-sm font-medium bg-[#185FA5] text-blue-100 cursor-pointer hover:bg-[#0C447C] transition-colors"
+            onClick={() => handleRender("quick")}
+            disabled={rendering || !canRender}
+            className={`w-full mt-1.5 py-1.5 rounded-lg border text-[12px] cursor-pointer transition-colors
+              ${canRender && !rendering
+                ? "bg-white text-amber-800 border-amber-200 hover:bg-amber-50"
+                : "bg-gray-50 text-gray-400 border-gray-100 cursor-not-allowed"}`}
           >
-            💬 Pedir cambios
+            ⚡ Vista previa rápida (540p)
           </button>
         </div>
-      )}
-
-      <div className="mb-1.5 text-[13px] text-gray-400">{readyCount}/5 capas listas</div>
-
-      {LAYERS.map(layer => (
-        <LayerCard
-          key={layer.key}
-          projectId={project.id}
-          layer={layer}
-          status={project.layers?.[layer.key] || "empty"}
-          config={project.config?.[layer.key] || {}}
-          layerInfo={project.layer_info?.[layer.key]}
-          script={project.config?.script}
-          onUpdate={() => {
-            apiJson(`/api/projects/${project.id}`).then(d => { if (d.id) setProject(d) })
-            fetchDurations()
-          }}
-        />
-      ))}
+      </div>
 
       {showScript && (
         <ScriptEditor

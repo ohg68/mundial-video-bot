@@ -7,11 +7,14 @@ const LAYER_LABELS = {
   output: "Render final",
 }
 
-export default function VideoPreview({ projectId, layers }) {
-  const [activeLayer, setActiveLayer] = useState("output")
+// showOutput=false deja fuera la pestaña "Render final": en el editor el
+// resultado vive en su propia columna, y tenerlo también acá mostraba el mismo
+// vídeo dos veces en pantalla.
+export default function VideoPreview({ projectId, layers, showOutput = true }) {
+  const [activeLayer, setActiveLayer] = useState(showOutput ? "output" : "video")
 
   const available = []
-  if (layers?.output?.exists) available.push("output")
+  if (showOutput && layers?.output?.exists) available.push("output")
   if (layers?.video?.exists) available.push("video")
   if (layers?.audio?.exists) available.push("audio")
   if (layers?.music?.exists) available.push("music")

@@ -31,7 +31,7 @@ const VIDEO_SOURCES = [
   { key: "mixed_photos", label: "🎞 Mix (Fotos + Video)" },
 ]
 
-export default function LayerCard({ projectId, layer, status, config, layerInfo, onUpdate }) {
+export default function LayerCard({ projectId, layer, status, config, layerInfo, onUpdate, optional = false }) {
   const [loading, setLoading] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [volume, setVolume] = useState(
@@ -143,7 +143,11 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
   const canGenerate = ["audio", "video", "subtitles"].includes(layer.key)
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl mb-2.5 overflow-hidden">
+    <div className={`rounded-xl mb-2.5 overflow-hidden ${
+      optional && status === "empty"
+        ? "bg-transparent border border-dashed border-gray-300"
+        : "bg-white border border-gray-200"
+    }`}>
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2.5 px-4 py-3 bg-transparent border-none cursor-pointer text-left"
@@ -155,13 +159,21 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
           {layer.icon} {layer.label}
         </span>
         <div className="flex-1 flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${STATUS_DOT[status]}`} />
-          <span className="text-xs text-gray-400">
-            {loading ? "Procesando..." : STATUS_LABEL[status]}
-            {layerInfo?.clips && ` · ${layerInfo.clips} clips`}
-            {layerInfo?.voice && ` · ${layerInfo.voice}`}
-            {layerInfo?.provider && ` · ${layerInfo.provider}`}
-          </span>
+          {/* Una capa opcional vacía no está "sin configurar": simplemente no la
+              usaste. Se ofrece añadirla en vez de marcarla como pendiente. */}
+          {optional && status === "empty" && !loading ? (
+            <span className="text-xs text-[#185FA5]">Añadir</span>
+          ) : (
+            <>
+              <span className={`w-2 h-2 rounded-full ${STATUS_DOT[status]}`} />
+              <span className="text-xs text-gray-400">
+                {loading ? "Procesando..." : STATUS_LABEL[status]}
+                {layerInfo?.clips && ` · ${layerInfo.clips} clips`}
+                {layerInfo?.voice && ` · ${layerInfo.voice}`}
+                {layerInfo?.provider && ` · ${layerInfo.provider}`}
+              </span>
+            </>
+          )}
         </div>
         <span className="text-xs text-gray-400">{expanded ? "▲" : "▼"}</span>
       </button>
