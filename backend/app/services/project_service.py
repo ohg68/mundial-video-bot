@@ -1,10 +1,13 @@
 import json
+import logging
 import uuid
 import shutil
 from pathlib import Path
 from datetime import datetime
 from app.models.project import ProjectConfig, LayerStatus
 from app.database import SessionLocal, Project
+
+log = logging.getLogger(__name__)
 
 PROJECTS_DIR = Path("projects")
 PROJECTS_DIR.mkdir(exist_ok=True)
@@ -263,6 +266,62 @@ def duplicate_project(project_id: str) -> dict:
         db.commit()
         db.refresh(new_project)
         return new_project.to_dict()
+    finally:
+        db.close()
+
+
+def reconcile_layer_states() -> dict:
+    """Corrige capas que la BD marca como listas pero cuyo archivo no está.
+
+    El disco de Railway es efímero: los archivos se restauran de Cloudinary al
+    arrancar, pero si una capa nunca llegó a subirse (reinicio a mitad de la
+    subida, fallo de red) queda un estado mentiroso — la BD dice 'ready' y la UI
+    ofrece renderizar, pero el archivo no existe. Esto se corre al arrancar,
+    DESPUÉS del restore, y devuelve esas capas a 'empty' para que se regeneren.
+
+    Devuelve {"projects": n_proyectos_tocados, "layers": n_capas_corregidas}.
+    """
+    db = SessionLocal()
+    touched_projects, fixed_layers = 0, 0
+    try:
+        for project in db.query(Project).all():
+            layers = json.loads(project.layers or "{}")
+            layer_info = json.loads(project.layer_info or "{}")
+            changed = False
+
+            for layer in LAYER_FILES:
+                if layers.get(layer) != LayerStatus.ready:
+                    continue
+                path = get_layer_path(project.id, layer)
+                if path.exists() and path.stat().st_size > 0:
+                    continue
+                layers[layer] = LayerStatus.empty
+                info = layer_info.get(layer) or {}
+                info["error"] = "El archivo se perdió (disco efímero) — hay que regenerar la capa."
+                layer_info[layer] = info
+                fixed_layers += 1
+                changed = True
+                log.warning(f"Reconciliación: {project.id}/{layer} decía 'ready' sin archivo")
+
+            # Lo mismo para el render final: si output apunta a algo que no está,
+            # limpiarlo para que la UI no ofrezca descargar un archivo inexistente.
+            if project.output:
+                out = Path(project.output)
+                if not out.exists() or out.stat().st_size == 0:
+                    project.output = None
+                    fixed_layers += 1
+                    changed = True
+                    log.warning(f"Reconciliación: {project.id} tenía output sin archivo")
+
+            if changed:
+                project.layers = json.dumps(layers, ensure_ascii=False)
+                project.layer_info = json.dumps(layer_info, ensure_ascii=False)
+                touched_projects += 1
+
+        if touched_projects:
+            db.commit()
+            log.info(f"Reconciliación: {fixed_layers} capas corregidas en {touched_projects} proyectos")
+        return {"projects": touched_projects, "layers": fixed_layers}
     finally:
         db.close()
 

@@ -31,6 +31,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).error(f"Restore de capas falló: {e}")
 
+    # Después del restore: lo que la BD diga 'ready' pero no tenga archivo en
+    # disco vuelve a 'empty'. Evita el estado mentiroso (UI ofrece renderizar
+    # una capa que ya no existe y el render falla a mitad).
+    try:
+        from app.services import project_service
+        project_service.reconcile_layer_states()
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Reconciliación de capas falló: {e}")
+
     await task_queue.start()
 
     async def _periodic_backup():
