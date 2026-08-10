@@ -14,6 +14,13 @@ from app.websocket import websocket_endpoint
 
 logging.basicConfig(level=logging.INFO)
 
+# httpx loguea la URL completa de cada request en INFO. El polling del bot llama
+# a api.telegram.org/bot<TOKEN>/getUpdates varias veces por segundo, así que el
+# token acababa escrito miles de veces en los logs de Railway, en texto plano y
+# al alcance de cualquiera con acceso al panel. En WARNING los errores de red
+# siguen apareciendo.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
