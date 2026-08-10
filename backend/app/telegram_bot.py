@@ -164,6 +164,13 @@ async def _send_video(bot, chat_id: int, path: Path, caption: str = ""):
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
+def _layer_error(project_id: str, layer: str) -> str:
+    """Motivo del último fallo de una capa, tal como lo dejó layer_service."""
+    meta = project_service.get_project(project_id) or {}
+    info = (meta.get("layer_info") or {}).get(layer) or {}
+    return info.get("error") or f"No se pudo generar la capa '{layer}'."
+
+
 async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str, ab_split: bool = False,
                         gdrive_folder_id: str = None, language: str = "es"):
     """Genera el video completo y lo entrega por Telegram."""
@@ -214,7 +221,14 @@ async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str, 
         )
 
         # 5. Capa de video
-        await layer_service.assemble_video_layer(project_id, config)
+        # assemble_video_layer NO lanza cuando falla: marca la capa en error y
+        # devuelve None (lo necesita el endpoint web, que corre en BackgroundTask
+        # y perdería la excepción). Si no miramos el retorno, el pipeline anuncia
+        # "✅ Video ensamblado" y revienta un paso después con el desconcertante
+        # "Video layer missing — cannot render", tapando la causa real.
+        video_layer = await layer_service.assemble_video_layer(project_id, config)
+        if video_layer is None:
+            raise RuntimeError(_layer_error(project_id, "video"))
         await bot.send_message(
             chat_id,
             "✅ Video ensamblado\n\n⚡ *Renderizando (1080p)...*",

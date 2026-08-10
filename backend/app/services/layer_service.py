@@ -602,7 +602,20 @@ Responde SOLO con un array JSON válido, sin markdown ni texto extra:
     start = raw.find("[")
     if start == -1:
         raise RuntimeError(f"DeepSeek scene-plan: respuesta sin array JSON: {raw[:200]}")
-    scenes, _ = json.JSONDecoder().raw_decode(raw[start:])
+    try:
+        scenes, _ = json.JSONDecoder().raw_decode(raw[start:])
+    except json.JSONDecodeError as e:
+        # El JSONDecodeError solo dice en qué carácter se rompió, no qué devolvió
+        # el modelo: sin la respuesta cruda en el log no hay forma de saber si fue
+        # una coma final, prosa entremedio o una respuesta cortada por max_tokens.
+        log.error(
+            "DeepSeek scene-plan [%s]: JSON inválido (%s). finish_reason=%s. Respuesta cruda:\n%s",
+            project_id, e, data["choices"][0].get("finish_reason"), raw,
+        )
+        raise RuntimeError(
+            "DeepSeek devolvió un plan de escenas ilegible (JSON inválido). "
+            "Suele arreglarse reintentando."
+        ) from e
 
     clean = []
     for s in scenes[:scene_count]:
