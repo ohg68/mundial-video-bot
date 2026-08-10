@@ -176,7 +176,10 @@ def get_layer_path(project_id: str, layer: str) -> Path:
 def get_project_size(project_id: str) -> dict:
     project_dir = PROJECTS_DIR / project_id
     if not project_dir.exists():
-        return None
+        # Un proyecto caducado no tiene carpeta hasta que se regenere. Ocupa
+        # cero, que es la respuesta correcta — devolver null obligaba a la UI a
+        # distinguir "no existe" de "está vacío" para decir lo mismo.
+        return {s: 0 for s in LAYER_SUBDIRS} | {"total": 0}
     sizes = {}
     total = 0
     for subdir in ["video", "audio", "music", "subtitles", "overlay", "output"]:
@@ -223,6 +226,19 @@ def bulk_delete(project_ids: list) -> dict:
     finally:
         db.close()
     return {"deleted": deleted, "freed_bytes": freed, "freed_mb": round(freed / 1024 / 1024, 1)}
+
+
+def _conservar_updated_at(project, valor):
+    """Deja updated_at como estaba tras un cambio de mantenimiento.
+
+    updated_at es el reloj de la retención y la columna lleva onupdate, así que
+    cualquier escritura la pone al día: el proyecto deja de figurar como vencido
+    y el restore de Cloudinary vuelve a bajar sus archivos, anulando la
+    retención. Además hace falta flag_modified — reasignar el mismo valor no
+    ensucia la columna, SQLAlchemy la deja fuera del UPDATE y el onupdate gana.
+    """
+    project.updated_at = valor
+    flag_modified(project, "updated_at")
 
 
 def is_expired(project, days: int = None, now: datetime = None) -> bool:
@@ -282,10 +298,6 @@ def purge_expired_files(days: int = None, now: datetime = None) -> dict:
             if not size:
                 continue  # ya purgado: no tocar la ficha ni renovar updated_at
 
-            # updated_at es el reloj de la retención y la columna lleva onupdate:
-            # sin fijarlo a mano, purgar lo pondría al día, el proyecto dejaría de
-            # figurar como vencido y el restore de Cloudinary lo revivría al
-            # siguiente arranque, deshaciendo el purgado.
             visto_por_ultima_vez = project.updated_at
 
             shutil.rmtree(d)
@@ -303,11 +315,7 @@ def purge_expired_files(days: int = None, now: datetime = None) -> dict:
             project.layers = json.dumps(layers, ensure_ascii=False)
             project.layer_info = json.dumps(layer_info, ensure_ascii=False)
             project.output = None
-            # Reasignar el mismo valor no ensucia la columna, así que SQLAlchemy la
-            # dejaría fuera del UPDATE y el onupdate la pondría al día igualmente.
-            # flag_modified la mete en el SET con nuestra fecha.
-            project.updated_at = visto_por_ultima_vez
-            flag_modified(project, "updated_at")
+            _conservar_updated_at(project, visto_por_ultima_vez)
 
             freed += size
             purged.append(project.id)
@@ -393,6 +401,16 @@ def reconcile_layer_states() -> dict:
             layers = json.loads(project.layers or "{}")
             layer_info = json.loads(project.layer_info or "{}")
             changed = False
+            visto_por_ultima_vez = project.updated_at
+
+            # Un proyecto vencido llega aquí sin archivos, pero no porque se
+            # perdieran: caducaron a propósito. El restore ni siquiera los baja,
+            # así que el purgado no llega a tocarlo y sin esto el usuario leería
+            # "el archivo se perdió" cuando en realidad expiró.
+            motivo = (f"Los archivos caducaron a los {RETENTION_DAYS} días y se borraron "
+                      f"para no ocupar disco. Hay que regenerar la capa."
+                      if is_expired(project)
+                      else "El archivo se perdió (disco efímero) — hay que regenerar la capa.")
 
             for layer in LAYER_FILES:
                 if layers.get(layer) != LayerStatus.ready:
@@ -402,7 +420,7 @@ def reconcile_layer_states() -> dict:
                     continue
                 layers[layer] = LayerStatus.empty
                 info = layer_info.get(layer) or {}
-                info["error"] = "El archivo se perdió (disco efímero) — hay que regenerar la capa."
+                info["error"] = motivo
                 layer_info[layer] = info
                 fixed_layers += 1
                 changed = True
@@ -421,6 +439,10 @@ def reconcile_layer_states() -> dict:
             if changed:
                 project.layers = json.dumps(layers, ensure_ascii=False)
                 project.layer_info = json.dumps(layer_info, ensure_ascii=False)
+                # Corregir el estado es mantenimiento, no actividad del usuario:
+                # si renovara updated_at, un proyecto vencido volvería a parecer
+                # reciente y el restore lo revivría, anulando la retención.
+                _conservar_updated_at(project, visto_por_ultima_vez)
                 touched_projects += 1
 
         if touched_projects:
