@@ -38,11 +38,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).error(f"Restore de capas falló: {e}")
 
+    # Retención: los proyectos que llevan más de RETENTION_DAYS sin tocarse
+    # pierden sus archivos. Va después del restore para barrer también lo que
+    # hubiera quedado de arranques anteriores.
+    from app.services import project_service
+    try:
+        project_service.purge_expired_files()
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Purgado por retención falló: {e}")
+
     # Después del restore: lo que la BD diga 'ready' pero no tenga archivo en
     # disco vuelve a 'empty'. Evita el estado mentiroso (UI ofrece renderizar
     # una capa que ya no existe y el render falla a mitad).
     try:
-        from app.services import project_service
         project_service.reconcile_layer_states()
     except Exception as e:
         logging.getLogger(__name__).error(f"Reconciliación de capas falló: {e}")
@@ -58,6 +66,24 @@ async def lifespan(app: FastAPI):
                 logging.getLogger(__name__).error(f"Backup periódico falló: {e}")
 
     app.state.backup_task = asyncio.create_task(_periodic_backup())
+
+    async def _periodic_purge():
+        # Cada 6 h, para que un contenedor que lleve días arriba también respete
+        # la retención sin esperar a un redeploy.
+        while True:
+            await asyncio.sleep(6 * 3600)
+            try:
+                r = await asyncio.to_thread(project_service.purge_expired_files)
+                if r["purged"]:
+                    logging.getLogger(__name__).info(
+                        "Retención: %s proyectos purgados, %s MB liberados",
+                        len(r["purged"]), r["freed_mb"])
+            except Exception as e:
+                logging.getLogger(__name__).error(f"Purgado periódico falló: {e}")
+
+    # Guardar la referencia: el loop solo mantiene weakrefs y el GC puede matar
+    # una task sin dueño (ya pasó con el polling del bot).
+    app.state.purge_task = asyncio.create_task(_periodic_purge())
 
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if telegram_token:

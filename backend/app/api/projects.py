@@ -31,6 +31,18 @@ def get_stats():
     return project_service.get_all_stats()
 
 
+@router.get("/retention")
+def retention_status():
+    """Qué proyectos están vencidos y cuánto disco liberaría purgarlos ahora."""
+    return project_service.retention_status()
+
+
+@router.post("/purge-expired")
+def purge_expired(days: int = None):
+    """Ejecuta el purgado por retención a demanda (además del automático)."""
+    return project_service.purge_expired_files(days)
+
+
 @router.post("/bulk-delete")
 def bulk_delete(body: dict = Body(...), user=Depends(get_current_user)):
     ids = body.get("project_ids", [])

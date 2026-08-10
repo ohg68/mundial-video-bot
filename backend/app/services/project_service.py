@@ -1,9 +1,11 @@
 import json
 import logging
+import os
 import uuid
 import shutil
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy.orm.attributes import flag_modified
 from app.models.project import ProjectConfig, LayerStatus
 from app.database import SessionLocal, Project
 
@@ -19,6 +21,13 @@ LAYER_FILES = {
     "subtitles": "subtitles.srt",
     "overlay": "overlay.png",
 }
+
+LAYER_SUBDIRS = ["video", "audio", "music", "subtitles", "overlay", "output"]
+
+# Días que se conservan los archivos de un proyecto sin tocarlo. Pasado ese
+# plazo se borran del disco; la ficha (título, guion, config) se conserva y las
+# capas vuelven a 'empty', así que el proyecto se puede regenerar.
+RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "5"))
 
 
 def create_project(config: ProjectConfig, owner_id: int = None) -> dict:
@@ -214,6 +223,102 @@ def bulk_delete(project_ids: list) -> dict:
     finally:
         db.close()
     return {"deleted": deleted, "freed_bytes": freed, "freed_mb": round(freed / 1024 / 1024, 1)}
+
+
+def is_expired(project, days: int = None, now: datetime = None) -> bool:
+    """True si el proyecto lleva más de `days` días sin tocarse."""
+    days = RETENTION_DAYS if days is None else days
+    if days <= 0:
+        return False
+    now = now or datetime.utcnow()
+    last = project.updated_at or project.created_at
+    return bool(last and last < now - timedelta(days=days))
+
+
+def retention_status(days: int = None) -> dict:
+    """Simulacro del purgado: qué se borraría y cuánto disco liberaría. No toca nada."""
+    days = RETENTION_DAYS if days is None else days
+    now = datetime.utcnow()
+    vencidos, total = [], 0
+    db = SessionLocal()
+    try:
+        for project in db.query(Project).all():
+            d = PROJECTS_DIR / project.id
+            size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) if d.exists() else 0
+            last = project.updated_at or project.created_at
+            if is_expired(project, days, now) and size:
+                vencidos.append({
+                    "id": project.id, "title": project.title,
+                    "updated_at": last.isoformat() if last else None,
+                    "dias_sin_tocar": round((now - last).total_seconds() / 86400, 1) if last else None,
+                    "size_mb": round(size / 1024 / 1024, 1),
+                })
+                total += size
+    finally:
+        db.close()
+    return {"retention_days": days, "expirados": vencidos,
+            "liberaria_mb": round(total / 1024 / 1024, 1)}
+
+
+def purge_expired_files(days: int = None, now: datetime = None) -> dict:
+    """Borra del disco los archivos de los proyectos vencidos.
+
+    Solo se van los archivos: la ficha del proyecto (título, guion, config)
+    se conserva y las capas vuelven a 'empty', de modo que el proyecto sigue
+    en la lista y se puede regenerar. El borrado es definitivo — en Railway el
+    disco es efímero de todos modos, y las copias siguen en Cloudinary.
+    """
+    days = RETENTION_DAYS if days is None else days
+    freed, purged = 0, []
+    db = SessionLocal()
+    try:
+        for project in db.query(Project).all():
+            if not is_expired(project, days, now):
+                continue
+            d = PROJECTS_DIR / project.id
+            if not d.exists():
+                continue
+            size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            if not size:
+                continue  # ya purgado: no tocar la ficha ni renovar updated_at
+
+            # updated_at es el reloj de la retención y la columna lleva onupdate:
+            # sin fijarlo a mano, purgar lo pondría al día, el proyecto dejaría de
+            # figurar como vencido y el restore de Cloudinary lo revivría al
+            # siguiente arranque, deshaciendo el purgado.
+            visto_por_ultima_vez = project.updated_at
+
+            shutil.rmtree(d)
+            for subdir in LAYER_SUBDIRS:
+                (d / subdir).mkdir(parents=True, exist_ok=True)
+
+            layers = json.loads(project.layers or "{}")
+            layer_info = json.loads(project.layer_info or "{}")
+            for layer in LAYER_FILES:
+                layers[layer] = LayerStatus.empty
+                info = layer_info.get(layer) or {}
+                info["error"] = (f"Los archivos caducaron a los {days} días y se borraron "
+                                 f"para no ocupar disco. Hay que regenerar la capa.")
+                layer_info[layer] = info
+            project.layers = json.dumps(layers, ensure_ascii=False)
+            project.layer_info = json.dumps(layer_info, ensure_ascii=False)
+            project.output = None
+            # Reasignar el mismo valor no ensucia la columna, así que SQLAlchemy la
+            # dejaría fuera del UPDATE y el onupdate la pondría al día igualmente.
+            # flag_modified la mete en el SET con nuestra fecha.
+            project.updated_at = visto_por_ultima_vez
+            flag_modified(project, "updated_at")
+
+            freed += size
+            purged.append(project.id)
+            log.info(f"Retención: {project.id} purgado ({round(size / 1024 / 1024, 1)} MB)")
+
+        if purged:
+            db.commit()
+    finally:
+        db.close()
+    return {"purged": purged, "freed_bytes": freed, "freed_mb": round(freed / 1024 / 1024, 1),
+            "retention_days": days}
 
 
 def clear_renders(project_id: str) -> dict:

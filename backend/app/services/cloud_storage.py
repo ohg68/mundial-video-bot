@@ -251,13 +251,21 @@ async def restore_all_layers() -> int:
         return 0
 
     from app.database import SessionLocal, Project
+    from app.services import project_service
     projects_root = Path("projects")
     total = 0
     db = SessionLocal()
     try:
-        ids = [p.id for p in db.query(Project.id).all()]
+        # Los proyectos vencidos no se restauran: si no, el purgado por retención
+        # se desharía en el siguiente arranque bajando otra vez de Cloudinary lo
+        # que se acababa de borrar del disco.
+        proyectos = db.query(Project).all()
+        ids = [p.id for p in proyectos if not project_service.is_expired(p)]
+        omitidos = len(proyectos) - len(ids)
     finally:
         db.close()
+    if omitidos:
+        log.info(f"Startup: {omitidos} proyectos vencidos, no se restauran sus capas")
 
     from app.services import motion_service
     for pid in ids:
