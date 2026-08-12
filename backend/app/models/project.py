@@ -114,6 +114,11 @@ class ProjectConfig(BaseModel):
     match_date: Optional[str] = None
     aspect: Literal["9:16", "16:9"] = "9:16"
     language: str = "es"
+    # Duración objetivo del video. No hay forma de recortar un video ya montado
+    # a un tiempo fijo sin estropearlo, así que esto actúa donde de verdad decide:
+    # el guion se genera con las palabras que se leen en ese tiempo, y el resto
+    # del pipeline sigue al audio.
+    target_seconds: Literal[30, 60, 90] = 60
     script: Optional[str] = None
     llm_provider: LLMProvider = LLMProvider.deepseek
     script_template: ScriptTemplate = ScriptTemplate.free

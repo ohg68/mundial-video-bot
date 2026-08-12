@@ -21,7 +21,7 @@ async def generate_layer(project_id: str, layer: str, background_tasks: Backgrou
         template = config.script_template
         script = await llm_service.generate_script(
             config.topic, provider, template, config.language,
-            config.match, config.match_date,
+            config.match, config.match_date, config.target_seconds,
         )
         # Persistir en SQLite (project.json es efímero en Railway)
         project_service.update_project_config(project_id, {"script": script})
@@ -50,11 +50,15 @@ async def _generate_audio_task(project_id: str, config: ProjectConfig):
     if not script:
         script = await llm_service.generate_script(
             config.topic, config.llm_provider, config.script_template,
-            config.language, config.match, config.match_date,
+            config.language, config.match, config.match_date, config.target_seconds,
         )
     output_path = project_service.get_layer_path(project_id, "audio")
     provider = config.audio.tts_provider
-    voice = config.audio.voice.value if config.audio.voice.value != "custom" else "es-ES-AlvaroNeural"
+    # resolve_voice es la única resolución de voz del sistema: prioriza voice_name
+    # (voz libre de edge-tts, que es lo que escribe la web y lo que fija el bot según
+    # el idioma), después el enum, y por último la voz del idioma. Antes aquí se leía
+    # solo el enum, así que elegir una voz en la web no cambiaba el audio.
+    voice = layer_service.resolve_voice(config)
     voice_id = config.audio.elevenlabs_voice_id
     if provider == "openai":
         voice = config.audio.openai_voice
@@ -143,11 +147,49 @@ async def remove_overlay_background(project_id: str):
     return {"status": "bg_removed", "project_id": project_id}
 
 
+# Campos de la config que no viven dentro de ninguna capa. Van por su propia ruta
+# porque config/{layer} los anidaría: la web llamaba a config/llm y terminaba
+# escribiendo config["llm"] = {...}, una clave que ProjectConfig no tiene y que por
+# tanto se descartaba — la plantilla y el proveedor elegidos no se guardaban nunca.
+_ROOT_FIELDS = {"target_seconds", "llm_provider", "script_template", "language", "aspect"}
+
+_LAYERS = {"video", "audio", "music", "subtitles", "overlay", "editing"}
+
+
+@router.patch("/{project_id}/config")
+async def update_root_config(project_id: str, update: dict):
+    """Actualiza campos de la config que no pertenecen a una capa."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    desconocidos = set(update) - _ROOT_FIELDS
+    if desconocidos:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Campos no admitidos: {', '.join(sorted(desconocidos))}")
+
+    merged = {**project["config"], **update}
+    # Validar antes de guardar: así una duración inválida da un 400 claro en vez de
+    # quedar escrita y hacer estallar el pipeline más tarde.
+    try:
+        ProjectConfig(**merged)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Configuración inválida: {e}")
+
+    project_service.update_project_config(project_id, update)
+    return {"updated": sorted(update), "config": update}
+
+
 @router.patch("/{project_id}/config/{layer}")
 async def update_layer_config(project_id: str, layer: str, update: dict):
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if layer not in _LAYERS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{layer}' no es una capa. Para campos generales usá PATCH /config")
 
     merged = {**project["config"].get(layer, {}), **update}
     # Persistir en SQLite (project.json es efímero en Railway)

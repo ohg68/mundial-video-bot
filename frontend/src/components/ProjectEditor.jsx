@@ -318,9 +318,12 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
           topic={project.topic || project.title}
           match={project.match}
           matchDate={project.match_date}
+          targetSeconds={project.config?.target_seconds}
+          llmProvider={project.config?.llm_provider}
+          scriptTemplate={project.config?.script_template}
           onClose={() => setShowScript(false)}
-          onSaved={(script) => setProject(p => ({
-            ...p, config: { ...p.config, script }
+          onSaved={(script, prefs) => setProject(p => ({
+            ...p, config: { ...p.config, script, ...(prefs || {}) }
           }))}
         />
       )}

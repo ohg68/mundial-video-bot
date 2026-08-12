@@ -104,3 +104,54 @@ def clean_script(text: str) -> str:
     result = "\n".join(out_lines)
     result = re.sub(r"\n{3,}", "\n\n", result).strip()
     return result or text.strip()  # fallback: si quedó vacío, devolver original
+
+
+# ── Duración objetivo ─────────────────────────────────────────────────────────
+#
+# La duración del video la manda la narración: el TTS lee el guion, y la cadencia
+# de tomas y el A/B se ajustan al audio resultante. Así que pedir un video de
+# 30 s es pedir un guion que se lea en 30 s.
+#
+# A los modelos no les sirve que les pidas segundos — se pasan de largo sin
+# darse cuenta. Con un número de palabras aciertan mucho más, así que traducimos
+# la duración a palabras con el mismo ritmo de locución que ya asume
+# estimate_timestamps (150 palabras por minuto).
+
+WORDS_PER_SECOND = 2.5
+
+# Por encima de este múltiplo del presupuesto, el guion se recorta. Los modelos
+# se pasan siempre un poco; recortar por un 10% de más daría guiones mutilados
+# a cambio de nada.
+_OVERSHOOT_LIMIT = 1.25
+
+
+def target_words(seconds: int, speed: float = 1.0) -> int:
+    """Palabras que caben en `seconds` de narración.
+
+    `speed` es la velocidad del TTS: a 1.1 la voz lee un 10% más rápido, así que
+    en el mismo tiempo entra un 10% más de texto.
+    """
+    return max(20, round(seconds * WORDS_PER_SECOND * speed))
+
+
+def fit_to_duration(script: str, max_words: int) -> str:
+    """Recorta el guion si se pasó holgadamente del presupuesto de palabras.
+
+    Quita párrafos enteros empezando por el penúltimo y hacia atrás, de modo que
+    el gancho (primer párrafo) y la llamada a la acción (último) sobrevivan: son
+    justo las dos partes que no se pueden perder. Si con dos párrafos todavía se
+    pasa, se devuelve así — mejor un video algo más largo que uno sin cierre.
+    """
+    if not script or max_words <= 0:
+        return script
+
+    paragraphs = [p.strip() for p in script.split("\n\n") if p.strip()]
+    total = sum(len(p.split()) for p in paragraphs)
+    if total <= max_words * _OVERSHOOT_LIMIT:
+        return script
+
+    while len(paragraphs) > 2 and total > max_words:
+        quitado = paragraphs.pop(-2)
+        total -= len(quitado.split())
+
+    return "\n\n".join(paragraphs)

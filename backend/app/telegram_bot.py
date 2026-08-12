@@ -36,7 +36,8 @@ log = logging.getLogger(__name__)
 (WAITING_TITLE, WAITING_TOPIC, WAITING_SOURCE,
  WAITING_LAYER_ACTION, WAITING_AUDIO_VOICE, WAITING_AUDIO_SPEED,
  WAITING_VIDEO_SOURCE, WAITING_FILE_UPLOAD,
- WAITING_SCRIPT_EDIT, WAITING_GDRIVE_FOLDER, WAITING_LANG) = range(11)
+ WAITING_SCRIPT_EDIT, WAITING_GDRIVE_FOLDER, WAITING_LANG,
+ WAITING_DURATION) = range(12)
 
 # ── Seguridad ─────────────────────────────────────────────────────────────────
 
@@ -91,7 +92,8 @@ def _owns(project_id: str, chat_id: int):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool = True,
-                  gdrive_folder_id: str = None, language: str = "es") -> ProjectConfig:
+                  gdrive_folder_id: str = None, language: str = "es",
+                  target_seconds: int = 60) -> ProjectConfig:
     from app.services.layer_service import LANG_INFO
     voice_name = LANG_INFO.get(language, LANG_INFO["es"])[1]
     return ProjectConfig(
@@ -99,8 +101,12 @@ def _build_config(title: str, topic: str, source: str = "pexels", ab_split: bool
         topic=topic,
         aspect="9:16",
         language=language,
+        target_seconds=target_seconds,
+        # Una escena cada ~10 s: con las 6 fijas de antes, un video de 30 s bajaba
+        # 12 visuales para repartir entre 5 segundos de narración cada una.
         video=VideoLayerConfig(source=VideoSource(source), clip_duration=4, ab_split=ab_split,
-                               gdrive_folder_id=gdrive_folder_id),
+                               gdrive_folder_id=gdrive_folder_id,
+                               scene_count=max(3, round(target_seconds / 10))),
         audio=AudioLayerConfig(speed=1.1, volume=0.9, voice_name=voice_name),
         music=MusicLayerConfig(volume=0.25, fade_in=2, fade_out=3),
         subtitles=SubtitleLayerConfig(font_size=48, color="white", outline=True, position="bottom"),
@@ -172,13 +178,15 @@ def _layer_error(project_id: str, layer: str) -> str:
 
 
 async def _run_pipeline(bot, chat_id: int, title: str, topic: str, source: str, ab_split: bool = False,
-                        gdrive_folder_id: str = None, language: str = "es"):
+                        gdrive_folder_id: str = None, language: str = "es",
+                        target_seconds: int = 60):
     """Genera el video completo y lo entrega por Telegram."""
     project_id = None
     try:
         # 1. Crear proyecto (owner = chat_id de Telegram para aislamiento por usuario)
         config = _build_config(title, topic, source, ab_split=ab_split,
-                               gdrive_folder_id=gdrive_folder_id, language=language)
+                               gdrive_folder_id=gdrive_folder_id, language=language,
+                               target_seconds=target_seconds)
         meta = project_service.create_project(config, owner_id=chat_id)
         project_id = meta["id"]
 
@@ -568,6 +576,14 @@ async def on_titulo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _LANGS = [("🇪🇸 Español", "es"), ("🇺🇸 English", "en"), ("🇧🇷 Português", "pt"),
           ("🇫🇷 Français", "fr"), ("🇩🇪 Deutsch", "de"), ("🇮🇹 Italiano", "it")]
 
+# La duración se decide antes de generar el guion, porque es el guion el que la
+# fija: el TTS lo lee y el video se monta sobre ese audio.
+_DURATION_ROWS = [[
+    InlineKeyboardButton("⚡ 30 s", callback_data="dur_30"),
+    InlineKeyboardButton("🎯 60 s", callback_data="dur_60"),
+    InlineKeyboardButton("📖 90 s", callback_data="dur_90"),
+]]
+
 
 def _source_keyboard() -> InlineKeyboardMarkup:
     """Teclado de fuentes de video (solo muestra las que están configuradas)."""
@@ -606,14 +622,28 @@ async def on_tema(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Idioma elegido (lang_<code>): guarda y pasa a elegir la fuente de video."""
+    """Idioma elegido (lang_<code>): guarda y pasa a elegir la duración."""
     query = update.callback_query
     await query.answer()
     code = query.data.split("_", 1)[1]
     context.user_data["language"] = code
     label = next((l for l, c in _LANGS if c == code), code)
     await query.edit_message_text(
-        f"✅ Idioma: *{label}*\n\n¿Qué tipo de *fuente de video* usamos?",
+        f"✅ Idioma: *{label}*\n\n¿Cuánto querés que *dure* el video?",
+        reply_markup=InlineKeyboardMarkup(_DURATION_ROWS),
+        parse_mode="Markdown",
+    )
+    return WAITING_DURATION
+
+
+async def on_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Duración elegida (dur_<segundos>): guarda y pasa a elegir la fuente de video."""
+    query = update.callback_query
+    await query.answer()
+    segundos = int(query.data.split("_", 1)[1])
+    context.user_data["target_seconds"] = segundos
+    await query.edit_message_text(
+        f"✅ Duración: *{segundos} segundos*\n\n¿Qué tipo de *fuente de video* usamos?",
         reply_markup=_source_keyboard(),
         parse_mode="Markdown",
     )
@@ -669,8 +699,10 @@ async def on_fuente(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     lang = context.user_data.get("language", "es")
+    segundos = context.user_data.get("target_seconds", 60)
     asyncio.create_task(_run_pipeline(context.application.bot, chat_id, title, topic, source,
-                                      ab_split=ab_split, language=lang))
+                                      ab_split=ab_split, language=lang,
+                                      target_seconds=segundos))
     return ConversationHandler.END
 
 
@@ -692,9 +724,10 @@ async def on_gdrive_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     lang = context.user_data.get("language", "es")
+    segundos = context.user_data.get("target_seconds", 60)
     asyncio.create_task(_run_pipeline(
         context.application.bot, chat_id, title, topic, "gdrive",
-        gdrive_folder_id=folder_id, language=lang))
+        gdrive_folder_id=folder_id, language=lang, target_seconds=segundos))
     return ConversationHandler.END
 
 
@@ -1731,6 +1764,7 @@ def build_app(token: str) -> Application:
             WAITING_TITLE: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_titulo)],
             WAITING_TOPIC: [MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_tema)],
             WAITING_LANG: [CallbackQueryHandler(on_lang, pattern="^lang_")],
+            WAITING_DURATION: [CallbackQueryHandler(on_duration, pattern="^dur_")],
             WAITING_SOURCE: [CallbackQueryHandler(on_fuente, pattern="^src_")],
             WAITING_GDRIVE_FOLDER: [CallbackQueryHandler(on_gdrive_folder, pattern="^gdf_")],
         },

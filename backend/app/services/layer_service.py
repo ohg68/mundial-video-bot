@@ -5,9 +5,9 @@ import httpx
 import asyncio
 import subprocess
 from pathlib import Path
-from app.models.project import ProjectConfig, VideoSource, LayerStatus
+from app.models.project import ProjectConfig, VideoSource, LayerStatus, VoiceModel
 from app.services import project_service, photo_sources
-from app.services.script_utils import clean_script
+from app.services.script_utils import clean_script, fit_to_duration, target_words
 
 log = logging.getLogger(__name__)
 LOCAL_CLIPS_DIR = Path(os.getenv("LOCAL_CLIPS_DIR", "clips"))
@@ -57,15 +57,28 @@ LANG_INFO = {
 }
 
 
-def _resolve_voice(config: ProjectConfig) -> str:
-    """Voz edge-tts: prioriza voice_name (idioma libre); si no, el enum; si no, por idioma."""
+def resolve_voice(config: ProjectConfig) -> str:
+    """Voz edge-tts: prioriza voice_name (idioma libre); si no, el enum; si no, por idioma.
+
+    Es la única resolución de voz del sistema: la usan el pipeline del bot, los
+    subtítulos y la generación de audio de la web.
+    """
     vn = getattr(config.audio, "voice_name", None)
     if vn:
         return vn
-    try:
-        return config.audio.voice.value
-    except Exception:
-        return LANG_INFO.get(getattr(config, "language", "es"), LANG_INFO["es"])[1]
+
+    por_idioma = LANG_INFO.get(getattr(config, "language", "es"), LANG_INFO["es"])[1]
+
+    # El enum solo manda si dice algo distinto de su valor por defecto. Al
+    # persistir la config se guardan todos los campos, así que "es-ES-AlvaroNeural"
+    # puede ser una elección deliberada o simplemente el default que nadie tocó:
+    # si coincide con el default, gana la voz del idioma. Antes esto era código
+    # inalcanzable (voice siempre tiene valor, nunca lanzaba) y un video en
+    # italiano lo acababa narrando una voz española.
+    voz_enum = config.audio.voice.value if config.audio.voice else None
+    if not voz_enum or voz_enum in ("custom", VoiceModel.alvaro.value):
+        return por_idioma
+    return voz_enum
 
 
 async def generate_script(project_id: str, config: ProjectConfig) -> str:
@@ -79,8 +92,12 @@ async def generate_script(project_id: str, config: ProjectConfig) -> str:
         extra += f"\nFecha: {config.match_date}"
 
     lang_name = LANG_INFO.get(getattr(config, "language", "es"), LANG_INFO["es"])[0]
+    # La duración pedida se traduce a palabras contando con la velocidad del TTS:
+    # a speed 1.1 la voz lee un 10% más rápido y en el mismo tiempo entra más texto.
+    segundos = getattr(config, "target_seconds", 60)
+    palabras = target_words(segundos, getattr(config.audio, "speed", 1.0))
     prompt = f"""Eres un guionista de videos cortos para redes sociales (YouTube Shorts, TikTok, Reels).
-Genera un guion EN {lang_name} para un video corto de ~90 segundos sobre el siguiente tema.
+Genera un guion EN {lang_name} para un video corto de {segundos} segundos sobre el siguiente tema.
 El guion completo debe estar escrito en {lang_name}.
 
 Título: {config.title}
@@ -94,8 +111,13 @@ El guion debe:
 - Tener un gancho potente en los primeros 5 segundos
 - Ser informativo, claro y atractivo
 - Terminar con una llamada a la acción (suscríbete, comenta)
-- Durar aproximadamente 90 segundos al leerlo en voz alta
 - Contener solo el texto que leerá el narrador, sin indicaciones de escena ni acotaciones
+- Separar cada bloque/párrafo con una línea en blanco
+
+EXTENSIÓN (lo más importante): exactamente {palabras} palabras, con un margen del
+10% arriba o abajo. Se lee en voz alta y tiene que durar {segundos} segundos. Con
+{segundos} segundos no cabe todo: elegí las ideas que más valgan y desarrollalas,
+en vez de enumerar muchas de pasada.
 
 Responde SOLO con el guion, sin introducción ni explicación."""
 
@@ -119,6 +141,9 @@ Responde SOLO con el guion, sin introducción ni explicación."""
         raise RuntimeError(f"DeepSeek error (status {resp.status_code}): {data}")
     script = data["choices"][0]["message"]["content"]
     script = clean_script(script)  # quitar encabezados/acotaciones del LLM
+    # Red de seguridad: pedir palabras acierta mucho más que pedir segundos, pero
+    # los modelos igual se pasan. Sin esto, elegir 30 s daba videos de 50.
+    script = fit_to_duration(script, palabras)
 
     # Persistir en SQLite (project.json es efímero en Railway y nadie lo lee)
     project_service.update_project_config(project_id, {"script": script})
@@ -132,7 +157,7 @@ async def generate_audio(project_id: str, config: ProjectConfig) -> Path:
     output_path = project_service.get_layer_path(project_id, "audio")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    voice = _resolve_voice(config) if config.audio.custom_file is None else None
+    voice = resolve_voice(config) if config.audio.custom_file is None else None
     provider = getattr(config.audio, "tts_provider", None)
     provider = provider.value if hasattr(provider, "value") else provider
 
@@ -476,7 +501,7 @@ async def generate_subtitles(project_id: str, config: ProjectConfig = None) -> P
     # Obtener guión y voz reales (de config si viene, si no del proyecto guardado)
     if config is not None:
         script = config.script
-        voice = _resolve_voice(config)
+        voice = resolve_voice(config)
         speed = config.audio.speed
         lang = getattr(config, "language", "es")
     else:

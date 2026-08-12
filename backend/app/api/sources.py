@@ -69,13 +69,32 @@ async def list_elevenlabs_voices():
 
 @router.get("/tts/voices")
 async def list_all_voices():
+    # Dos voces (una de cada género) por cada idioma que el bot ofrece en /nuevo,
+    # más las variantes de español de América, que son las que más se piden.
+    # `region` es lo que agrupa el selector de la web.
     edge_voices = [
-        {"id": "es-ES-AlvaroNeural", "name": "Alvaro", "provider": "edge", "lang": "es-ES"},
-        {"id": "es-ES-ElviraNeural", "name": "Elvira", "provider": "edge", "lang": "es-ES"},
-        {"id": "pt-PT-DuarteNeural", "name": "Duarte", "provider": "edge", "lang": "pt-PT"},
-        {"id": "pt-PT-InesNeural", "name": "Inés", "provider": "edge", "lang": "pt-PT"},
-        {"id": "en-US-GuyNeural", "name": "Guy", "provider": "edge", "lang": "en-US"},
-        {"id": "en-US-JennyNeural", "name": "Jenny", "provider": "edge", "lang": "en-US"},
+        {"id": "es-ES-AlvaroNeural", "name": "Álvaro", "provider": "edge", "lang": "es-ES", "region": "Español · España"},
+        {"id": "es-ES-ElviraNeural", "name": "Elvira", "provider": "edge", "lang": "es-ES", "region": "Español · España"},
+        {"id": "es-MX-JorgeNeural", "name": "Jorge", "provider": "edge", "lang": "es-MX", "region": "Español · México"},
+        {"id": "es-MX-DaliaNeural", "name": "Dalia", "provider": "edge", "lang": "es-MX", "region": "Español · México"},
+        {"id": "es-AR-TomasNeural", "name": "Tomás", "provider": "edge", "lang": "es-AR", "region": "Español · Argentina"},
+        {"id": "es-AR-ElenaNeural", "name": "Elena", "provider": "edge", "lang": "es-AR", "region": "Español · Argentina"},
+        {"id": "es-CO-GonzaloNeural", "name": "Gonzalo", "provider": "edge", "lang": "es-CO", "region": "Español · Colombia"},
+        {"id": "es-CO-SalomeNeural", "name": "Salomé", "provider": "edge", "lang": "es-CO", "region": "Español · Colombia"},
+        {"id": "en-US-GuyNeural", "name": "Guy", "provider": "edge", "lang": "en-US", "region": "English · US"},
+        {"id": "en-US-JennyNeural", "name": "Jenny", "provider": "edge", "lang": "en-US", "region": "English · US"},
+        {"id": "en-GB-RyanNeural", "name": "Ryan", "provider": "edge", "lang": "en-GB", "region": "English · UK"},
+        {"id": "en-GB-SoniaNeural", "name": "Sonia", "provider": "edge", "lang": "en-GB", "region": "English · UK"},
+        {"id": "pt-BR-AntonioNeural", "name": "Antônio", "provider": "edge", "lang": "pt-BR", "region": "Português · Brasil"},
+        {"id": "pt-BR-FranciscaNeural", "name": "Francisca", "provider": "edge", "lang": "pt-BR", "region": "Português · Brasil"},
+        {"id": "pt-PT-DuarteNeural", "name": "Duarte", "provider": "edge", "lang": "pt-PT", "region": "Português · Portugal"},
+        {"id": "pt-PT-RaquelNeural", "name": "Raquel", "provider": "edge", "lang": "pt-PT", "region": "Português · Portugal"},
+        {"id": "fr-FR-HenriNeural", "name": "Henri", "provider": "edge", "lang": "fr-FR", "region": "Français"},
+        {"id": "fr-FR-DeniseNeural", "name": "Denise", "provider": "edge", "lang": "fr-FR", "region": "Français"},
+        {"id": "de-DE-ConradNeural", "name": "Conrad", "provider": "edge", "lang": "de-DE", "region": "Deutsch"},
+        {"id": "de-DE-KatjaNeural", "name": "Katja", "provider": "edge", "lang": "de-DE", "region": "Deutsch"},
+        {"id": "it-IT-DiegoNeural", "name": "Diego", "provider": "edge", "lang": "it-IT", "region": "Italiano"},
+        {"id": "it-IT-ElsaNeural", "name": "Elsa", "provider": "edge", "lang": "it-IT", "region": "Italiano"},
     ]
     openai_voices = [
         {"id": "alloy", "name": "Alloy", "provider": "openai"},
@@ -109,9 +128,13 @@ async def generate_script(body: dict = Body(...)):
     match = body.get("match")
     match_date = body.get("match_date")
 
+    target_seconds = body.get("target_seconds", 60)
+    if target_seconds not in (30, 60, 90):
+        raise HTTPException(status_code=400, detail="target_seconds debe ser 30, 60 o 90")
+
     try:
         script = await llm_service.generate_script(
-            topic, provider, template, language, match, match_date,
+            topic, provider, template, language, match, match_date, target_seconds,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

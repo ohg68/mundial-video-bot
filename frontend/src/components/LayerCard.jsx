@@ -1,4 +1,4 @@
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect } from "react"
 import ClipPicker from "./ClipPicker"
 import MediaLibrary from "./MediaLibrary"
 
@@ -45,8 +45,26 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
   const [previewAudio, setPreviewAudio] = useState(null)
   const [removingBg, setRemovingBg] = useState(false)
   const [bgError, setBgError] = useState(null)
+  const [edgeVoices, setEdgeVoices] = useState([])
+  const [configError, setConfigError] = useState(null)
   const fileRef = useRef()
   const audioRef = useRef()
+
+  // Las voces vienen del backend. Antes había tres escritas a mano acá dentro,
+  // mientras este endpoint ya servía muchas más y nadie lo llamaba.
+  useEffect(() => {
+    if (layer.key !== "audio") return
+    let vivo = true
+    fetch("/api/sources/tts/voices")
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => { if (vivo) setEdgeVoices(d.edge || []) })
+      .catch(() => { if (vivo) setEdgeVoices([]) })
+    return () => { vivo = false }
+  }, [layer.key])
+
+  // La voz efectiva es voice_name: es la que el pipeline usa cuando existe, y la
+  // única que puede nombrar voces fuera del enum (es-AR, it-IT...).
+  const voiceActual = config.voice_name || config.voice || "es-ES-AlvaroNeural"
 
   const handleGenerate = async () => {
     setLoading(true)
@@ -92,7 +110,7 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
     const provider = config.tts_provider || "edge"
     const body = {
       provider,
-      voice: provider === "openai" ? (config.openai_voice || "onyx") : (config.voice || "es-ES-AlvaroNeural"),
+      voice: provider === "openai" ? (config.openai_voice || "onyx") : voiceActual,
       voice_id: config.elevenlabs_voice_id,
       speed: config.speed || 1.0,
     }
@@ -116,11 +134,24 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
   }
 
   const updateConfig = async (updates) => {
-    await fetch(`/api/layers/${projectId}/config/${layer.key}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updates),
-    })
+    setConfigError(null)
+    try {
+      const res = await fetch(`/api/layers/${projectId}/config/${layer.key}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      })
+      if (!res.ok) {
+        // Antes esto se lanzaba y nadie miraba la respuesta: un fallo al guardar
+        // se veía igual que un guardado correcto.
+        const data = await res.json().catch(() => ({}))
+        setConfigError(data.detail || `No se pudo guardar (error ${res.status})`)
+        return
+      }
+      onUpdate()
+    } catch (e) {
+      setConfigError("No se pudo guardar: sin conexión con el servidor")
+    }
   }
 
   const handleRemoveBg = async () => {
@@ -297,15 +328,40 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
               {/* Voice selector based on provider */}
               <div>
                 <span className="text-[11px] text-gray-400 block mb-1">Voz</span>
+
+                {(!config.tts_provider || config.tts_provider === "edge") && (
+                  edgeVoices.length === 0
+                    ? <span className="text-[11px] text-gray-400">Cargando voces...</span>
+                    : (
+                      <div className="space-y-2">
+                        {Object.entries(
+                          edgeVoices.reduce((grupos, v) => {
+                            const k = v.region || v.lang
+                            ;(grupos[k] = grupos[k] || []).push(v)
+                            return grupos
+                          }, {})
+                        ).map(([region, voces]) => (
+                          <div key={region}>
+                            <span className="text-[10px] text-gray-400 block mb-1">{region}</span>
+                            <div className="flex gap-1.5 flex-wrap">
+                              {voces.map(v => (
+                                // Se escribe voice_name, no voice: es el campo que el
+                                // pipeline respeta y el único que admite voces que no
+                                // están en el enum.
+                                <button key={v.id} onClick={() => updateConfig({ voice_name: v.id })}
+                                  className={`btn-action ${voiceActual === v.id
+                                    ? "bg-green-50 border-green-400 text-green-900" : ""}`}>
+                                  {v.name}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )
+                )}
+
                 <div className="flex gap-1.5 flex-wrap">
-                  {(!config.tts_provider || config.tts_provider === "edge") && (
-                    ["es-ES-AlvaroNeural", "es-ES-ElviraNeural", "pt-PT-DuarteNeural"].map(v => (
-                      <button key={v} onClick={() => updateConfig({ voice: v })}
-                        className={`btn-action ${config.voice === v ? "bg-green-50 border-green-400 text-green-900" : ""}`}>
-                        {v.replace("Neural", "").replace("-", " ")}
-                      </button>
-                    ))
-                  )}
                   {config.tts_provider === "openai" && (
                     OPENAI_VOICES.map(v => (
                       <button key={v} onClick={() => updateConfig({ openai_voice: v })}
@@ -318,12 +374,23 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
                     <input
                       type="text"
                       placeholder="Voice ID de ElevenLabs"
-                      value={config.elevenlabs_voice_id || ""}
-                      onChange={e => updateConfig({ elevenlabs_voice_id: e.target.value })}
+                      defaultValue={config.elevenlabs_voice_id || ""}
+                      // Al salir del campo y no en cada tecla: así no se manda un
+                      // PATCH por carácter ni se recarga el proyecto mientras escribís.
+                      onBlur={e => {
+                        const val = e.target.value.trim()
+                        if (val !== (config.elevenlabs_voice_id || "")) {
+                          updateConfig({ elevenlabs_voice_id: val })
+                        }
+                      }}
                       className="input-field text-xs w-56"
                     />
                   )}
                 </div>
+
+                {configError && (
+                  <span className="text-[11px] text-red-600 block mt-1.5">{configError}</span>
+                )}
               </div>
 
               {/* Voice preview */}

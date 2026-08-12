@@ -6,12 +6,23 @@ const LLM_PROVIDERS = [
   { key: "openai", label: "GPT" },
 ]
 
-export default function ScriptEditor({ projectId, script, topic, match, matchDate, onClose, onSaved }) {
+// La duración se pide al generar el guion, porque es el guion el que la decide:
+// el TTS lo lee y el video se monta sobre ese audio.
+const DURATIONS = [
+  { seconds: 30, label: "30 s", hint: "~75 palabras" },
+  { seconds: 60, label: "60 s", hint: "~150 palabras" },
+  { seconds: 90, label: "90 s", hint: "~225 palabras" },
+]
+
+export default function ScriptEditor({ projectId, script, topic, match, matchDate,
+                                      targetSeconds, llmProvider, scriptTemplate,
+                                      onClose, onSaved }) {
   const [text, setText] = useState(script || "")
   const [generating, setGenerating] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [provider, setProvider] = useState("deepseek")
-  const [template, setTemplate] = useState("free")
+  const [provider, setProvider] = useState(llmProvider || "deepseek")
+  const [template, setTemplate] = useState(scriptTemplate || "free")
+  const [duration, setDuration] = useState(targetSeconds || 60)
   const [templates, setTemplates] = useState({})
   const [timestamps, setTimestamps] = useState([])
   const [error, setError] = useState(null)
@@ -45,7 +56,8 @@ export default function ScriptEditor({ projectId, script, topic, match, matchDat
       const res = await fetch("/api/sources/script/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: topic || "video del Mundial 2026", provider, template, match, match_date: matchDate }),
+        body: JSON.stringify({ topic: topic || "video del Mundial 2026", provider, template,
+                               match, match_date: matchDate, target_seconds: duration }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -62,19 +74,36 @@ export default function ScriptEditor({ projectId, script, topic, match, matchDat
 
   const handleSave = async () => {
     setSaving(true)
-    await fetch(`/api/layers/${projectId}/script`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ script: text }),
-    })
-    // Save LLM + template preferences
-    await fetch(`/api/layers/${projectId}/config/llm`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ llm_provider: provider, script_template: template }),
-    })
+    setError(null)
+    try {
+      const res = await fetch(`/api/layers/${projectId}/script`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script: text }),
+      })
+      if (!res.ok) throw new Error("No se pudo guardar el guion")
+
+      // Duración, proveedor y plantilla van por la ruta de config general. Antes
+      // esto llamaba a config/llm, que las anidaba bajo una clave "llm" que el
+      // backend no lee: la plantilla elegida se perdía en cada guardado.
+      const res2 = await fetch(`/api/layers/${projectId}/config`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          llm_provider: provider, script_template: template, target_seconds: duration,
+        }),
+      })
+      if (!res2.ok) {
+        const d = await res2.json().catch(() => ({}))
+        throw new Error(d.detail || "No se pudieron guardar las preferencias")
+      }
+    } catch (e) {
+      setError(e.message)
+      setSaving(false)
+      return
+    }
     setSaving(false)
-    onSaved(text)
+    onSaved(text, { target_seconds: duration, llm_provider: provider, script_template: template })
     onClose()
   }
 
@@ -109,6 +138,27 @@ export default function ScriptEditor({ projectId, script, topic, match, matchDat
                 {p.label}
               </button>
             ))}
+          </div>
+
+          {/* Duración objetivo */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] text-gray-400">Duración:</span>
+            {DURATIONS.map(d => (
+              <button
+                key={d.seconds}
+                onClick={() => setDuration(d.seconds)}
+                className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer transition-colors
+                  ${duration === d.seconds
+                    ? "bg-green-50 border-green-300 text-green-900 font-medium"
+                    : "bg-transparent border-gray-200 text-gray-500 hover:bg-gray-50"}`}
+                title={`El guion se genera con ${d.hint}`}
+              >
+                {d.label}
+              </button>
+            ))}
+            <span className="text-[10px] text-gray-400">
+              se aplica al generar el guion
+            </span>
           </div>
 
           {/* Template selector */}

@@ -8,54 +8,75 @@ from app.services.script_utils import clean_script
 
 log = logging.getLogger(__name__)
 
-TEMPLATES = {
+from app.services.script_utils import fit_to_duration, target_words
+
+# Cada plantilla es una lista de (bloque, peso). Los pesos se reparten sobre la
+# duración que se pida, así que la misma plantilla sirve para 30, 60 o 90 s.
+# Antes los segundos estaban escritos a mano ("Puesto 5 (12s)") y sumaban ~80:
+# con una duración distinta el prompt se contradecía a sí mismo y el modelo
+# seguía los segundos del desglose en vez del total.
+TEMPLATE_HEADLINES = {
     "free": "",
-    "preview": """Genera un guion para un vídeo de PREVIA de partido.
-Estructura:
-1. Gancho dramático (5s)
-2. Contexto del partido (15s)
-3. Estado de los equipos (20s)
-4. Jugadores clave (20s)
-5. Predicción (15s)
-6. Llamada a la acción (5s)
-Duración total: ~80 segundos leídos.""",
+    "preview": "Genera un guion para un vídeo de PREVIA de partido.",
+    "summary": "Genera un guion para un RESUMEN post-partido.",
+    "top5": "Genera un guion tipo TOP 5 / ranking.",
+    "tutorial": "Genera un guion tipo TUTORIAL / explicación.",
+}
 
-    "summary": """Genera un guion para un RESUMEN post-partido.
-Estructura:
-1. Resultado y reacción (5s)
-2. Primer tiempo — jugadas clave (25s)
-3. Segundo tiempo — goles y momentos (25s)
-4. MVP del partido (10s)
-5. Qué viene después (10s)
-6. Llamada a la acción (5s)
-Duración total: ~80 segundos leídos.""",
+TEMPLATE_BEATS = {
+    "free": [],
+    "preview": [
+        ("Gancho dramático", 5), ("Contexto del partido", 15),
+        ("Estado de los equipos", 20), ("Jugadores clave", 20),
+        ("Predicción", 15), ("Llamada a la acción", 5),
+    ],
+    "summary": [
+        ("Resultado y reacción", 5), ("Primer tiempo — jugadas clave", 25),
+        ("Segundo tiempo — goles y momentos", 25), ("MVP del partido", 10),
+        ("Qué viene después", 10), ("Llamada a la acción", 5),
+    ],
+    "top5": [
+        ("Intro + qué se va a rankear", 5), ("Puesto 5", 12), ("Puesto 4", 12),
+        ("Puesto 3", 12), ("Puesto 2", 12), ("Puesto 1 — con buildup", 15),
+        ("Cierre + CTA", 7),
+    ],
+    "tutorial": [
+        ("Problema o pregunta", 5), ("Contexto breve", 10), ("Paso 1", 15),
+        ("Paso 2", 15), ("Paso 3", 15), ("Resultado / resumen", 10),
+        ("Llamada a la acción", 5),
+    ],
+}
 
-    "top5": """Genera un guion tipo TOP 5 / ranking.
-Estructura:
-1. Intro + qué se va a rankear (5s)
-2. Puesto 5 (12s)
-3. Puesto 4 (12s)
-4. Puesto 3 (12s)
-5. Puesto 2 (12s)
-6. Puesto 1 — con buildup (15s)
-7. Cierre + CTA (7s)
-Duración total: ~75 segundos leídos.""",
-
-    "tutorial": """Genera un guion tipo TUTORIAL / explicación.
-Estructura:
-1. Problema o pregunta (5s)
-2. Contexto breve (10s)
-3. Paso 1 (15s)
-4. Paso 2 (15s)
-5. Paso 3 (15s)
-6. Resultado / resumen (10s)
-7. Llamada a la acción (5s)
-Duración total: ~75 segundos leídos.""",
+TEMPLATE_NAMES = {
+    "free": "Libre",
+    "preview": "Previa de partido",
+    "summary": "Resumen post-partido",
+    "top5": "Top 5 / Ranking",
+    "tutorial": "Tutorial / Explicación",
 }
 
 
-def _build_prompt(topic: str, template: str, language: str, match: str = None, match_date: str = None) -> str:
-    template_instructions = TEMPLATES.get(template, "")
+def _render_template(template: str, target_seconds: int) -> str:
+    """Instrucciones de la plantilla con los segundos escalados a la duración pedida."""
+    beats = TEMPLATE_BEATS.get(template) or []
+    if not beats:
+        return ""
+
+    total_peso = sum(p for _, p in beats)
+    lineas = []
+    for i, (bloque, peso) in enumerate(beats, 1):
+        # Mínimo 2 s por bloque: en un video de 30 s un bloque de peso 5 sobre 80
+        # daría menos de 2 s, que no alcanza ni para una frase.
+        segundos = max(2, round(peso / total_peso * target_seconds))
+        lineas.append(f"{i}. {bloque} ({segundos}s)")
+
+    return "{}\nEstructura:\n{}".format(TEMPLATE_HEADLINES.get(template, ""), "\n".join(lineas))
+
+
+def _build_prompt(topic: str, template: str, language: str, match: str = None,
+                  match_date: str = None, target_seconds: int = 60) -> str:
+    template_instructions = _render_template(template, target_seconds)
+    palabras = target_words(target_seconds)
 
     base = f"""Eres un locutor profesional para un canal de YouTube.
 Genera un guion en {"español" if language == "es" else language} para un vídeo corto sobre:
@@ -71,6 +92,11 @@ El guion debe:
 - Terminar con una llamada a la acción
 - Solo el texto que leerá el locutor, sin indicaciones de escena
 - Separar cada bloque/párrafo con una línea en blanco
+
+EXTENSIÓN (lo más importante): exactamente {palabras} palabras, con un margen del
+10% arriba o abajo. El guion se lee en voz alta y tiene que durar
+{target_seconds} segundos. Ajustá la profundidad de cada bloque a ese
+presupuesto: es mejor decir menos cosas y decirlas bien que meter todo y pasarse.
 
 Responde SOLO con el guion, sin introducción ni explicación."""
 
@@ -157,8 +183,9 @@ async def generate_script(
     language: str = "es",
     match: Optional[str] = None,
     match_date: Optional[str] = None,
+    target_seconds: int = 60,
 ) -> str:
-    prompt = _build_prompt(topic, template, language, match, match_date)
+    prompt = _build_prompt(topic, template, language, match, match_date, target_seconds)
 
     if provider == "deepseek":
         raw = await generate_deepseek(prompt)
@@ -169,7 +196,10 @@ async def generate_script(
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
 
-    return clean_script(raw)  # quitar encabezados/acotaciones del LLM
+    script = clean_script(raw)  # quitar encabezados/acotaciones del LLM
+    # Red de seguridad: pedir palabras acierta mucho más que pedir segundos, pero
+    # los modelos igual se pasan. Sin esto, elegir 30 s daba videos de 50.
+    return fit_to_duration(script, target_words(target_seconds))
 
 
 def estimate_timestamps(script: str, wpm: float = 150) -> list:
@@ -196,14 +226,9 @@ def estimate_timestamps(script: str, wpm: float = 150) -> list:
 def get_templates() -> dict:
     return {
         k: {
-            "name": {
-                "free": "Libre",
-                "preview": "Previa de partido",
-                "summary": "Resumen post-partido",
-                "top5": "Top 5 / Ranking",
-                "tutorial": "Tutorial / Explicación",
-            }[k],
-            "description": v[:80] + "..." if v else "Sin estructura predefinida",
+            "name": TEMPLATE_NAMES[k],
+            # Los bloques, sin segundos: ahora dependen de la duración elegida.
+            "description": " · ".join(b for b, _ in beats) if beats else "Sin estructura predefinida",
         }
-        for k, v in TEMPLATES.items()
+        for k, beats in TEMPLATE_BEATS.items()
     }
