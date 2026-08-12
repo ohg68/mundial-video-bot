@@ -8,6 +8,7 @@ usuario, no en Railway.
 """
 import json
 import mimetypes
+import re
 import subprocess
 import threading
 import urllib.parse
@@ -23,23 +24,148 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 JOBS = {}
 
 
+# Motivos que YouTube devuelve cuando el cliente por defecto no pudo
+# resolver el video. Son genéricos: tapan la causa real (DRM, privado,
+# edad), así que ante uno de estos vale la pena reintentar con otro
+# cliente para conseguir un mensaje que sirva.
+VAGUE_ERRORS = (
+    "this video is not available",
+    "video unavailable",
+    "failed to extract",
+)
+
+# Clientes alternativos para el reintento, en orden de confianza. Ojo:
+# `tv` llegó a reportar "DRM protected" para un video que el cliente por
+# defecto baja sin problema, así que va último y sólo se le cree si los
+# otros dos también fallaron.
+RETRY_CLIENTS = ("web_safari", "mweb", "tv")
+
+# (fragmento en el stderr de yt-dlp, explicación en castellano)
+FRIENDLY_ERRORS = (
+    ("drm protected", "El video se entrega con DRM (película, alquiler o contenido de pago) y no se "
+                      "puede descargar. Si recién instalaste deno, probá de nuevo: en algunos casos "
+                      "el DRM lo reportaba sólo el cliente de respaldo por faltar un runtime de JS."),
+    ("requested format is not available",
+     "No hay un formato descargable para este video. Puede faltar el runtime de JavaScript (deno)."),
+    ("private video", "El video es privado."),
+    ("members-only", "El video es solo para miembros del canal."),
+    ("join this channel", "El video es solo para miembros del canal."),
+    ("sign in to confirm your age", "El video tiene restricción de edad y requiere iniciar sesión."),
+    ("age-restricted", "El video tiene restricción de edad y requiere iniciar sesión."),
+    ("sign in to confirm you're not a bot", "YouTube pide verificación antihumano desde esta IP. "
+                                            "Probá de nuevo más tarde."),
+    ("not available in your country", "El video está bloqueado en tu país."),
+    ("removed by the uploader", "El autor borró el video."),
+    ("account associated with this video has been terminated",
+     "La cuenta que subió el video fue dada de baja."),
+    ("this video is not available", "YouTube reporta el video como no disponible."),
+    ("video unavailable", "YouTube reporta el video como no disponible."),
+    ("unsupported url", "yt-dlp no soporta ese sitio."),
+    ("is not a valid url", "La URL no es válida."),
+    # Los errores de red vienen con el stack de la excepción repetido dos
+    # veces; queda un párrafo enorme e inútil en pantalla.
+    ("failed to resolve", "No se pudo resolver el dominio. Revisá que la URL esté bien escrita."),
+    ("unable to download webpage", "No se pudo acceder a la página. Revisá la URL y tu conexión."),
+    ("connection refused", "No se pudo conectar con el sitio."),
+)
+
+
+def _is_youtube(url: str) -> bool:
+    # Comparar por dominio y no por substring: "youtube.com" in host daba
+    # verdadero para cosas como notyoutube.com.otro-sitio.net.
+    host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+    return any(host == d or host.endswith("." + d) for d in ("youtube.com", "youtu.be"))
+
+
+def _extract_error(stderr: str) -> str:
+    """Saca de stderr la causa real del fallo, y nada más.
+
+    yt-dlp escribe WARNING y ERROR mezclados en el mismo stream. Antes se
+    volcaban los últimos 500 caracteres crudos, así que el aviso de
+    "falta un runtime de JavaScript" quedaba pegado al error verdadero y
+    el usuario veía un párrafo ilegible. Nos quedamos con la última línea
+    ERROR y le sacamos los prefijos del extractor y del ID de video.
+    """
+    errores = [ln.strip() for ln in stderr.splitlines() if ln.strip().startswith("ERROR:")]
+    if not errores:
+        return ""
+    msg = errores[-1][len("ERROR:"):].strip()
+    msg = re.sub(r"^\[[^\]]+\]\s*", "", msg)      # "[youtube] "
+    msg = re.sub(r"^[\w-]{11}:\s*", "", msg)      # "w8Y-WrJcZbo: " (los IDs son de 11 chars)
+    # yt-dlp agrega instrucciones de bug report que acá no aportan nada.
+    msg = re.split(r"\s*(?:Please report this issue|Confirm you are on the latest version)",
+                   msg)[0]
+    return msg.strip()
+
+
+def _es_vago(msg: str) -> bool:
+    bajo = msg.lower()
+    return any(v in bajo for v in VAGUE_ERRORS)
+
+
+def _explain(msg: str) -> str:
+    bajo = msg.lower()
+    for fragmento, explicacion in FRIENDLY_ERRORS:
+        if fragmento in bajo:
+            return explicacion
+    return msg
+
+
+def _yt_dlp(url: str, out_tmpl: str, client: str = "") -> subprocess.CompletedProcess:
+    """Corre yt-dlp pidiendo el mejor video + el mejor audio por separado.
+
+    El selector viejo (`mp4/best`) sólo aceptaba archivos ya combinados,
+    que YouTube publica en calidad baja: se bajaba todo en 360p/720p sin
+    que se notara. Pidiendo las pistas por separado y uniéndolas con
+    ffmpeg se consigue la resolución máxima real.
+    """
+    cmd = ["yt-dlp",
+           "-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
+           "--merge-output-format", "mp4",
+           "-o", out_tmpl, "--no-playlist"]
+    if client:
+        cmd += ["--extractor-args", f"youtube:player_client={client}"]
+    cmd.append(url)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+
+
 def _run_download(job_id: str, url: str):
     out_tmpl = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
-    try:
-        proc = subprocess.run(
-            ["yt-dlp", "-f", "mp4/best", "-o", out_tmpl, "--no-playlist", url],
-            capture_output=True, text=True, timeout=1800,
-        )
-        if proc.returncode != 0:
-            JOBS[job_id] = {"status": "error", "url": url, "file": None,
-                             "error": proc.stderr[-500:] or "yt-dlp falló"}
-            return
+
+    def fallar(error: str):
+        JOBS[job_id] = {"status": "error", "url": url, "file": None, "error": error}
+
+    def listo():
         JOBS[job_id] = {"status": "done", "url": url, "file": None, "error": None}
+
+    try:
+        proc = _yt_dlp(url, out_tmpl)
+        if proc.returncode == 0:
+            return listo()
+
+        error = _extract_error(proc.stderr)
+        # Cuando YouTube contesta algo genérico ("not available"), suele
+        # ser el cliente y no el video: probando con otros clientes la
+        # descarga arranca, y si igual falla al menos conseguimos un
+        # motivo que se entienda.
+        if _is_youtube(url) and (not error or _es_vago(error)):
+            for cliente in RETRY_CLIENTS:
+                reintento = _yt_dlp(url, out_tmpl, client=cliente)
+                if reintento.returncode == 0:
+                    return listo()
+                alterno = _extract_error(reintento.stderr)
+                if alterno and not _es_vago(alterno):
+                    error = alterno  # motivo concreto: no hace falta seguir probando
+                    break
+                error = alterno or error
+
+        fallar(_explain(error) if error else "yt-dlp falló sin informar un motivo.")
     except FileNotFoundError:
-        JOBS[job_id] = {"status": "error", "url": url, "file": None,
-                         "error": "yt-dlp no está instalado. Corré: pip3 install yt-dlp"}
+        fallar("yt-dlp no está instalado. Corré: pip3 install yt-dlp")
+    except subprocess.TimeoutExpired:
+        fallar("La descarga tardó más de 30 minutos y se canceló.")
     except Exception as e:
-        JOBS[job_id] = {"status": "error", "url": url, "file": None, "error": str(e)[:500]}
+        fallar(str(e)[:500])
 
 
 def _probe_duration(path: Path) -> float:
