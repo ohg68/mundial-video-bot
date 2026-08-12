@@ -29,6 +29,46 @@ def is_configured() -> bool:
     return bool(service_url())
 
 
+# El sondeo es caro comparado con pintar un botón, así que se recuerda un rato.
+# Corto a propósito: si recreás el servicio, la interfaz se entera en un minuto
+# sin tener que redesplegar.
+_SONDEO: dict = {"vivo": None, "cuando": 0.0}
+_SONDEO_TTL = 60
+
+
+async def is_available() -> bool:
+    """True si el servicio responde de verdad, no sólo si la variable está puesta.
+
+    `is_configured()` sólo miraba que HYPERFRAMES_URL existiera, así que cuando
+    el microservicio desapareció de Railway la variable siguió ahí y el estado
+    seguía diciendo que sí: la interfaz ofrecía intros y captions kinéticos que
+    fallaban recién al usarlos. Comprobar que conteste es la diferencia entre
+    "configurado" y "disponible".
+    """
+    import time
+
+    base = service_url()
+    if not base:
+        return False
+
+    ahora = time.time()
+    if _SONDEO["vivo"] is not None and ahora - _SONDEO["cuando"] < _SONDEO_TTL:
+        return _SONDEO["vivo"]
+
+    vivo = False
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(f"{base}/health")
+            vivo = resp.status_code < 500
+    except Exception as e:
+        # Nivel info, no warning: con el servicio dado de baja esto pasa en cada
+        # sondeo y llenaría los logs de ruido esperado.
+        log.info("HyperFrames no responde en %s (%s)", base, type(e).__name__)
+
+    _SONDEO.update(vivo=vivo, cuando=ahora)
+    return vivo
+
+
 def motion_dir(project_id: str) -> Path:
     return Path("projects") / project_id / "motion"
 

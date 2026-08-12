@@ -11,6 +11,7 @@ import mimetypes
 import re
 import subprocess
 import threading
+import time
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -39,6 +40,12 @@ VAGUE_ERRORS = (
 # defecto baja sin problema, así que va último y sólo se le cree si los
 # otros dos también fallaron.
 RETRY_CLIENTS = ("web_safari", "mweb", "tv")
+
+# Presupuesto de tiempo para TODA la descarga, reintentos incluidos. Antes cada
+# intento tenía su propio tope de 30 min, así que con tres reintentos el peor
+# caso eran dos horas mientras el mensaje seguía diciendo "más de 30 minutos".
+DESCARGA_TIMEOUT = 1800
+RECORTE_TIMEOUT = 900
 
 # (fragmento en el stderr de yt-dlp, explicación en castellano)
 FRIENDLY_ERRORS = (
@@ -111,7 +118,8 @@ def _explain(msg: str) -> str:
     return msg
 
 
-def _yt_dlp(url: str, out_tmpl: str, client: str = "") -> subprocess.CompletedProcess:
+def _yt_dlp(url: str, out_tmpl: str, client: str = "",
+            timeout: float = DESCARGA_TIMEOUT) -> subprocess.CompletedProcess:
     """Corre yt-dlp pidiendo el mejor video + el mejor audio por separado.
 
     El selector viejo (`mp4/best`) sólo aceptaba archivos ya combinados,
@@ -126,7 +134,7 @@ def _yt_dlp(url: str, out_tmpl: str, client: str = "") -> subprocess.CompletedPr
     if client:
         cmd += ["--extractor-args", f"youtube:player_client={client}"]
     cmd.append(url)
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=max(1, timeout))
 
 
 def _run_download(job_id: str, url: str):
@@ -138,8 +146,13 @@ def _run_download(job_id: str, url: str):
     def listo():
         JOBS[job_id] = {"status": "done", "url": url, "file": None, "error": None}
 
+    # El plazo es de la descarga entera, no de cada intento: lo que queda del
+    # presupuesto es el tope del siguiente reintento.
+    limite = time.monotonic() + DESCARGA_TIMEOUT
+    restante = lambda: limite - time.monotonic()
+
     try:
-        proc = _yt_dlp(url, out_tmpl)
+        proc = _yt_dlp(url, out_tmpl, timeout=restante())
         if proc.returncode == 0:
             return listo()
 
@@ -150,7 +163,9 @@ def _run_download(job_id: str, url: str):
         # motivo que se entienda.
         if _is_youtube(url) and (not error or _es_vago(error)):
             for cliente in RETRY_CLIENTS:
-                reintento = _yt_dlp(url, out_tmpl, client=cliente)
+                if restante() <= 30:
+                    break          # sin tiempo para otro intento con sentido
+                reintento = _yt_dlp(url, out_tmpl, client=cliente, timeout=restante())
                 if reintento.returncode == 0:
                     return listo()
                 alterno = _extract_error(reintento.stderr)
@@ -163,7 +178,7 @@ def _run_download(job_id: str, url: str):
     except FileNotFoundError:
         fallar("yt-dlp no está instalado. Corré: pip3 install yt-dlp")
     except subprocess.TimeoutExpired:
-        fallar("La descarga tardó más de 30 minutos y se canceló.")
+        fallar(f"La descarga superó los {DESCARGA_TIMEOUT // 60} minutos y se canceló.")
     except Exception as e:
         fallar(str(e)[:500])
 
@@ -182,24 +197,34 @@ def _probe_duration(path: Path) -> float:
 def _trim_clip(src: Path, dest: Path, start: float, end: float) -> tuple[bool, str]:
     """Recorta [start,end) de `src` a `dest`. Intenta stream-copy primero
     (rápido, sin recodificar); si el códec de origen no es compatible con el
-    contenedor de salida, recodifica como fallback."""
-    duration = max(0.0, end - start)
-    proc = subprocess.run(
-        ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
-         "-c", "copy", str(dest)],
-        capture_output=True, text=True, timeout=300,
-    )
-    if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
-        return True, ""
+    contenedor de salida, recodifica como fallback.
 
-    proc = subprocess.run(
-        ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
-         "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-c:a", "aac", str(dest)],
-        capture_output=True, text=True, timeout=300,
+    Nunca lanza: devuelve (False, motivo). El timeout de ffmpeg se escapaba de
+    aquí y del handler de /api/trim, así que recortar un video largo —el segundo
+    paso recodifica y tarda— reventaba la petición con un 500 crudo en lugar del
+    mensaje que el resto del archivo se toma el trabajo de construir.
+    """
+    duration = max(0.0, end - start)
+    base = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}"]
+    intentos = (
+        base + ["-c", "copy", str(dest)],
+        base + ["-c:v", "libx264", "-crf", "23", "-preset", "fast", "-c:a", "aac", str(dest)],
     )
-    if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
-        return True, ""
-    return False, proc.stderr[-500:] or "ffmpeg falló al recortar"
+
+    error = "ffmpeg falló al recortar"
+    for cmd in intentos:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=RECORTE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return False, (f"El recorte superó los {RECORTE_TIMEOUT // 60} minutos y se canceló. "
+                           f"Probá con un tramo más corto.")
+        except FileNotFoundError:
+            return False, "ffmpeg no está instalado."
+        if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+            return True, ""
+        error = proc.stderr[-500:] or error
+
+    return False, error
 
 
 INDEX_HTML = """<!doctype html>

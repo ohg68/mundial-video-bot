@@ -29,6 +29,7 @@ export default function MotionPanel({ projectId, projectTitle, onClose }) {
   })
   const [status, setStatus] = useState({ intro: { exists: false }, outro: { exists: false }, captions: { exists: false } })
   const [configured, setConfigured] = useState(true)
+  const [soloConfigurado, setSoloConfigurado] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState(null)
   const [previewKey, setPreviewKey] = useState(0)
@@ -43,7 +44,9 @@ export default function MotionPanel({ projectId, projectTitle, onClose }) {
   useEffect(() => {
     fetch("/api/motion/status")
       .then(r => r.json())
-      .then(d => setConfigured(!!d.configured))
+      // `available` y no `configured`: la variable puede estar puesta y el
+      // servicio no existir, que es justo lo que pasaba.
+      .then(d => { setConfigured(!!d.available); setSoloConfigurado(!!d.configured) })
       .catch(() => {})
     refreshStatus()
   }, [projectId])
@@ -90,7 +93,9 @@ export default function MotionPanel({ projectId, projectTitle, onClose }) {
 
         {!configured && (
           <div className="mb-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-            El servicio de motion graphics no está configurado (HYPERFRAMES_URL).
+            {soloConfigurado
+              ? "El servicio de motion graphics no responde. HYPERFRAMES_URL apunta a un servicio que no está levantado."
+              : "El servicio de motion graphics no está configurado (HYPERFRAMES_URL)."}
           </div>
         )}
 

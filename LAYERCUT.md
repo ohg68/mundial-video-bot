@@ -1,256 +1,230 @@
-# LayerCut — Guia de Arquitectura y Modificaciones
+# LayerCut — Guía de arquitectura
 
-> Plataforma de produccion de video para el Mundial 2026.
-> Deploy: https://layercut-production.up.railway.app
-> Repo: ohg68/mundial-video-bot | Branch: phase1/mobile-first-ui
+> Producción de video vertical para redes: de un tema a un MP4 con narración,
+> imágenes, música y subtítulos.
+>
+> **Producción:** https://layercut-production.up.railway.app
+> **Repo:** `ohg68/mundial-video-bot` · **Rama de trabajo:** `phase1/mobile-first-ui`
+>
+> ⚠️ **Railway despliega desde `main`.** Para que un cambio llegue a producción
+> tiene que estar en `main`, no sólo en la rama de trabajo:
+> `git push origin phase1/mobile-first-ui:main`.
+> Un `railway up` manual es un override temporal: cualquier redeploy posterior
+> —incluido el que dispara *cambiar una variable de entorno*— reconstruye desde
+> `main` y lo pisa.
+
+---
+
+## Cómo se usa
+
+Dos vías, sobre el mismo backend:
+
+- **Bot de Telegram** — la principal. Acepta comandos escritos y **notas de voz**.
+- **Web** — editor por capas, para ajustar lo que el bot generó.
 
 ---
 
 ## Stack
 
-| Capa | Tecnologia |
-|------|-----------|
+| Pieza | Tecnología |
+|---|---|
+| Backend | FastAPI (Python 3.11) + SQLAlchemy + SQLite |
 | Frontend | React 18 + Vite + Tailwind CSS 4 |
-| Backend | FastAPI + SQLAlchemy + SQLite |
-| Video | FFmpeg (filter_complex, subtitles, overlay) |
-| TTS | Edge-TTS, OpenAI TTS HD, ElevenLabs |
-| LLM | DeepSeek, Claude, OpenAI (gpt-4o-mini) |
-| Deploy | Docker (multi-stage) en Railway |
+| Video | FFmpeg (`filter_complex`) |
+| Narración | edge-tts (por defecto), OpenAI TTS, ElevenLabs, Google TTS |
+| Guiones | DeepSeek (por defecto), Claude, GPT-4o-mini |
+| Voz a texto | faster-whisper **local** |
+| Persistencia | Cloudinary (el disco de Railway es efímero) |
+| Deploy | Docker en Railway |
+
+**Por qué Whisper local y no API:** Groq Whisper está bloqueado geográficamente
+en la región del usuario. Modelo `base` en CPU (int8), configurable con
+`WHISPER_MODEL` — bajar a `tiny` si hay OOM. Corre en `asyncio.to_thread` porque
+el bot y FastAPI comparten el event loop.
 
 ---
 
-## Estructura de archivos
+## Entrar (sin contraseña)
+
+No hay contraseñas: nada que recordar ni que recuperar.
 
 ```
-mundial-video-bot/
-├── Dockerfile                    # Multi-stage: Node 20 (build) + Python 3.11 + FFmpeg
-├── railway.toml                  # Config Railway (healthcheck /health)
-│
-├── backend/
-│   ├── main.py                   # FastAPI app, lifespan, rutas, SPA catch-all
-│   ├── requirements.txt          # Dependencias Python
-│   │
-│   ├── app/
-│   │   ├── auth.py               # JWT HMAC-SHA256 (register/login/me)
-│   │   ├── database.py           # SQLAlchemy models: User, Project, TaskRecord, ShareLink, ScheduledPost
-│   │   ├── migrate.py            # Migra project.json → SQLite al arrancar
-│   │   ├── task_queue.py         # Cola async con 3 workers + WebSocket progress
-│   │   ├── websocket.py          # ConnectionManager por proyecto + parse FFmpeg progress
-│   │   │
-│   │   ├── models/
-│   │   │   └── project.py        # Pydantic models: ProjectConfig, LayerConfigs, enums
-│   │   │
-│   │   ├── api/
-│   │   │   ├── projects.py       # CRUD proyectos + stats/bulk-delete/duplicate/tags/category
-│   │   │   ├── layers.py         # Upload/generate capas (video, audio, subtitles, overlay)
-│   │   │   ├── render.py         # Render full/quick + history + durations (ffprobe)
-│   │   │   ├── publish.py        # Publicar YouTube/TikTok/Instagram + schedule + thumbnail
-│   │   │   ├── share.py          # Share links con token + expiracion + preview HTML
-│   │   │   └── sources.py        # Clips (Pexels/Pixabay/Coverr/YouTube), TTS, LLM scripts
-│   │   │
-│   │   └── services/
-│   │       ├── project_service.py    # Logica de proyectos (SQLite + filesystem)
-│   │       ├── render_service.py     # FFmpeg render (filter_complex chain)
-│   │       ├── llm_service.py        # DeepSeek/Claude/OpenAI + templates + timestamps
-│   │       ├── tts_service.py        # Edge-TTS/OpenAI/ElevenLabs
-│   │       ├── video_sources.py      # Pexels/Pixabay/Coverr/YouTube search + download
-│   │       ├── photo_sources.py      # Fotos via Pexels + Pixabay Photos API + descarga paralela + Ken Burns FFmpeg
-│   │       ├── publish_service.py    # Multi-platform publish + thumbnails
-│   │       └── layer_service.py      # Ensamblado capa video (local/pexels/photos/mixed_photos)
-│
-├── frontend/
-│   ├── vite.config.js            # Tailwind plugin + proxy /api → :8000
-│   ├── index.html                # PWA meta tags + service worker
-│   │
-│   ├── src/
-│   │   ├── main.jsx              # Entry point
-│   │   ├── App.jsx               # Auth gate + drawer sidebar + BottomNav + routing
-│   │   ├── api.js                # fetch wrapper con JWT auto-inject + 401 logout
-│   │   ├── index.css             # @import "tailwindcss" + .btn-outline, .btn-action, .input-field
-│   │   │
-│   │   ├── hooks/
-│   │   │   ├── useAuth.js        # login/register/logout + /me check
-│   │   │   └── useProjectSocket.js # WebSocket auto-reconnect + progress/status
-│   │   │
-│   │   └── components/
-│   │       ├── LoginForm.jsx     # Login/register toggle
-│   │       ├── ProjectList.jsx   # Lista con bulk select, duplicate, category chips, stats
-│   │       ├── ProjectEditor.jsx # Editor principal: layers + render + preview + publish
-│   │       ├── LayerCard.jsx     # Card por capa: upload, ClipPicker, TTS selector
-│   │       ├── ClipPicker.jsx    # Modal busqueda clips multi-source
-│   │       ├── ScriptEditor.jsx  # Editor guion: LLM selector, templates, timestamps
-│   │       ├── VideoPreview.jsx  # Player HTML5 con tabs (output/video/audio/music)
-│   │       ├── Timeline.jsx      # 5 tracks color-coded proporcionales
-│   │       ├── RenderHistory.jsx # Modal historial renders con download/delete
-│   │       ├── PublishPanel.jsx  # Modal publicar multi-plataforma + share links + schedule
-│   │       ├── NewProjectModal.jsx # Bottom-sheet crear proyecto
-│   │       └── BottomNav.jsx     # Nav inferior mobile (Proyectos/Editor/Preview)
-│   │
-│   └── public/
-│       ├── manifest.json         # PWA manifest
-│       ├── sw.js                 # Service worker network-first
-│       ├── icon-192.png
-│       └── icon-512.png
+Telegram: /entrar  →  código de 6 dígitos (5 min, un solo uso)
+Web:      pegar el código  →  sesión de 30 días
 ```
 
----
+El código lo emite el bot, que ya conoce tu identidad. Pedir otro invalida el
+anterior; 5 fallos en 15 minutos cortan con un 429.
 
-## Variables de entorno (Railway)
+**Llave de emergencia:** `LAYERCUT_RECOVERY_TOKEN` vale como sesión por sí misma
+y se pega en el mismo campo del código. Es la salida si el bot se cae — se lee
+del panel de Railway.
 
-| Variable | Requerida | Uso |
-|----------|-----------|-----|
-| `JWT_SECRET` | Si | Firma tokens auth |
-| `DEEPSEEK_API_KEY` | Si* | Generacion de guiones |
-| `ANTHROPIC_API_KEY` | No | Claude como LLM alternativo |
-| `OPENAI_API_KEY` | No | GPT-4o-mini + TTS HD |
-| `ELEVENLABS_API_KEY` | No | Voces ElevenLabs |
-| `PEXELS_API_KEY` | No | Busqueda clips y fotos Pexels (fuente `photos` / `mixed_photos` usan el API de fotos) |
-| `PIXABAY_API_KEY` | No | Busqueda clips y fotos Pixabay (idem) |
-| `TIKTOK_ACCESS_TOKEN` | No | Publicar en TikTok |
-| `INSTAGRAM_ACCESS_TOKEN` | No | Publicar en Instagram |
-| `INSTAGRAM_USER_ID` | No | Publicar en Instagram |
-| `YOUTUBE_TOKEN` | No | Publicar en YouTube |
-| `YOUTUBE_REFRESH_TOKEN` | No | Publicar en YouTube |
-| `YOUTUBE_CLIENT_ID` | No | Publicar en YouTube |
-| `YOUTUBE_CLIENT_SECRET` | No | Publicar en YouTube |
+`/entrar` **exige** `TELEGRAM_ALLOWED_CHATS` configurada, aunque el bot esté
+abierto para lo demás: sin whitelist, cualquiera que encontrara el bot pediría un
+código y entraría.
 
-*Al menos un LLM key es necesaria para generar guiones.
+Un middleware exige sesión en todo `/api` salvo `/api/auth/telegram/verify`,
+`/api/auth/status` y las vistas públicas de share (`view`/`video`/`thumb`), cuyo
+sentido es compartir con gente sin cuenta.
+
+En el frontend, `api.js` **intercepta `window.fetch`** y añade la sesión a toda
+petición a `/api` del propio origen. Es deliberado: hay decenas de llamadas con
+`fetch` suelto por los componentes y así ninguna se puede saltar la cabecera.
 
 ---
 
-## API Endpoints
+## Las 5 capas
 
-### Auth (`/api/auth`)
-| Metodo | Ruta | Descripcion |
-|--------|------|-------------|
-| POST | `/register` | Crear usuario |
-| POST | `/login` | Login → JWT |
-| GET | `/me` | Usuario actual |
+| Capa | Archivo | Qué es |
+|---|---|---|
+| `video` | `video.mp4` | Clips de bancos, fotos con Ken Burns o Google Drive |
+| `audio` | `narration.mp3` | Narración TTS del guion |
+| `music` | `music.mp3` | Fondo con fundidos |
+| `subtitles` | `subtitles.srt` | El texto de la narración, sincronizado |
+| `overlay` | `overlay.png` | Logo, con el fondo quitado por rembg |
 
-### Projects (`/api/projects`)
-| Metodo | Ruta | Descripcion |
-|--------|------|-------------|
-| GET | `/` | Listar (filtros: category, tag, owner) |
-| POST | `/` | Crear proyecto |
-| GET | `/{id}` | Detalle proyecto |
-| DELETE | `/{id}` | Eliminar |
-| POST | `/{id}/duplicate` | Duplicar |
-| POST | `/bulk-delete` | Eliminar varios |
-| GET | `/stats` | Estadisticas disco |
-| PATCH | `/{id}/tags` | Actualizar tags |
-| PATCH | `/{id}/category` | Actualizar categoria |
-| GET | `/{id}/size` | Tamano en disco |
-| DELETE | `/{id}/renders` | Limpiar renders |
-
-### Layers (`/api/layers`)
-| Metodo | Ruta | Descripcion |
-|--------|------|-------------|
-| POST | `/{id}/upload/{layer}` | Subir archivo de capa |
-| GET | `/{id}/download/{layer}` | Descargar capa |
-| POST | `/{id}/generate/audio` | Generar audio TTS |
-| POST | `/{id}/generate/subtitles` | Generar SRT desde script |
-| PATCH | `/{id}/script` | Guardar guion |
-| PATCH | `/{id}/config/llm` | Guardar prefs LLM |
-
-### Render (`/api/render`)
-| Metodo | Ruta | Descripcion |
-|--------|------|-------------|
-| POST | `/{id}` | Render full (1080p) |
-| POST | `/{id}/quick` | Preview 540p |
-| GET | `/{id}/download` | Descargar render |
-| GET | `/{id}/durations` | Duraciones ffprobe |
-| GET | `/{id}/history` | Historial renders |
-| GET/DELETE | `/{id}/history/{file}` | Descargar/eliminar version |
-
-### Publish (`/api/publish`)
-| Metodo | Ruta | Descripcion |
-|--------|------|-------------|
-| POST | `/{id}/youtube` | Publicar YouTube |
-| POST | `/{id}/tiktok` | Publicar TikTok |
-| POST | `/{id}/instagram` | Publicar Instagram |
-| POST | `/{id}/multi` | Publicar multi-plataforma |
-| POST | `/{id}/thumbnail` | Generar thumbnail |
-| POST | `/{id}/schedule` | Programar publicacion |
-| GET | `/{id}/schedule` | Listar programadas |
-| DELETE | `/{id}/schedule/{post_id}` | Cancelar programada |
-
-### Share (`/api/share`)
-| Metodo | Ruta | Descripcion |
-|--------|------|-------------|
-| POST | `/{id}/create` | Crear link compartido (72h) |
-| GET | `/{id}/links` | Listar links |
-| DELETE | `/{id}/links/{link_id}` | Eliminar link |
-| GET | `/view/{token}` | Preview publica HTML |
-| GET | `/video/{token}` | Stream video compartido |
-| GET | `/thumb/{token}` | Thumbnail compartido |
-
-### Sources (`/api/sources`)
-| Metodo | Ruta | Descripcion |
-|--------|------|-------------|
-| GET | `/clips/search` | Buscar clips (Pexels/Pixabay/Coverr/YouTube) |
-| POST | `/clips/download` | Descargar clip |
-| POST | `/{id}/clips/upload` | Upload multiple clips |
-| POST | `/tts/preview` | Preview voz TTS (5s) |
-| GET | `/tts/voices` | Listar voces (Edge/OpenAI/ElevenLabs) |
-| GET | `/tts/voices/elevenlabs` | Voces ElevenLabs |
-| POST | `/script/generate` | Generar guion con IA |
-| POST | `/script/timestamps` | Calcular timestamps |
-| GET | `/script/templates` | Listar plantillas |
+Viven en `projects/{id}/{capa}/`. El render final es una cadena de
+`filter_complex`: subtítulos y overlay sobre el video, narración y música
+mezcladas con `amix`. Cola asíncrona de 3 workers, semáforo de 2 renders
+simultáneos (`MAX_CONCURRENT_RENDERS`), progreso por WebSocket.
 
 ---
 
-## Las 5 Capas
+## Del tema al video
 
-| # | Capa | Key | Color | Archivos |
-|---|------|-----|-------|----------|
-| 1 | Video | `video` | #0C447C | .mp4 en `projects/{id}/video/` |
-| 2 | Narracion | `audio` | #27500A | .mp3 generado por TTS |
-| 3 | Musica | `music` | #633806 | .mp3 en `projects/{id}/music/` |
-| 4 | Subtitulos | `subtitles` | #3C3489 | .srt generado desde script |
-| 5 | Overlay | `overlay` | #712B13 | .png logo/branding |
+1. **Guion** — DeepSeek escribe con un presupuesto de **palabras**, no de
+   segundos: a los modelos pedirles segundos no les sirve. `target_seconds`
+   (30/60/90) × 2,5 palabras/s × la velocidad del TTS. Si aun así se pasa más de
+   un 25%, `fit_to_duration` quita párrafos del medio conservando el gancho y la
+   llamada a la acción.
+2. **Keywords visuales en inglés** — el tema crudo en español daba resultados
+   absurdos (buscar "mercado" traía bazares árabes para un video sobre el mercado
+   portugués). `generate_visual_keywords` produce 5 términos en inglés.
+3. **A/B split** (activado por defecto) — segmenta el guion en escenas y baja dos
+   visuales por escena, para que la imagen siga lo que se narra. Sin esto las
+   tomas se eligen con keywords genéricas y se ordenan al azar.
+4. **Cadencia** — trocea en tomas de ~4 s siguiendo el audio, con segmentos
+   únicos y barajados. Cada toma se normaliza a **30 fps constantes**: los clips
+   de los bancos vienen a fps distintos y concatenarlos sin normalizar rompía los
+   timestamps.
 
-### Flujo de render (FFmpeg)
+> **Dos generadores de guion.** La web pasa por `llm_service` (con plantillas);
+> el bot tiene el suyo en `layer_service.generate_script`. Si cambiás cómo se
+> pide el guion, hay que tocar los dos.
+
+### Fuentes de video
+
+Con rama real en el pipeline: `photos`, `mixed_photos`, `pexels`, `pixabay`,
+`coverr`, `stock` (los tres bancos juntos), `wikimedia` (sólo imágenes, filtradas
+a dominio público/CC0 para no necesitar atribución), `gdrive`, `local`.
+
+`gdrive` y `wikimedia` son las únicas que **no** pasan por el camino A/B.
+
+**YouTube está descartado** por copyright/ToS. El camino limpio: bajar con el
+Downloader local o desde YouTube Studio, y subir a Drive.
+
+---
+
+## Persistencia y retención
+
+El disco de Railway se borra en cada deploy. Cloudinary es la red de seguridad:
+copia de la base cada 5 minutos y al apagar, restauración al arrancar.
+
+Orden en el arranque (importa): **restore → purgado por retención →
+reconciliación**.
+
+- **Retención** (`RETENTION_DAYS`, 5): los archivos de un proyecto sin tocar
+  caducan. La ficha (título, guion, config) se conserva y las capas vuelven a
+  `empty`, así que se puede regenerar.
+- **Reconciliación**: lo que la base dice `ready` pero no tiene archivo vuelve a
+  `empty`, distinguiendo "caducó a propósito" de "el disco efímero se lo comió".
+
+> ⚠️ **La trampa de `updated_at`.** Es el reloj de la retención y la columna
+> lleva `onupdate`, así que *cualquier* escritura la pone al día y el proyecto
+> deja de estar vencido — con lo que el restore le devuelve los archivos y la
+> retención no caduca nunca. Por eso el mantenimiento usa
+> `_conservar_updated_at()`, que necesita `flag_modified` (reasignar el mismo
+> valor no ensucia la columna y SQLAlchemy la deja fuera del UPDATE). El restore
+> además salta los proyectos vencidos. **No simplificar esto sin leer el porqué.**
+
+> **Nunca escribir estado en `project.json`.** Es efímero y sólo se lee al migrar.
+> Todo va por `project_service`, que escribe en SQLite. Este bug hizo que el guion
+> y los cambios de config se perdieran en silencio.
+
+---
+
+## Variables de entorno
+
+| Variable | ¿Hace falta? | Para qué |
+|---|---|---|
+| `JWT_SECRET` | **Sí** | Firma las sesiones. Sin ella se usa un valor por defecto que está en el repo. |
+| `TELEGRAM_BOT_TOKEN` | **Sí** | El bot. Sin él no arranca y no hay forma de pedir código. |
+| `TELEGRAM_ALLOWED_CHATS` | **Sí** | Chats autorizados. Sin ella `/entrar` se niega a emitir códigos. |
+| `LAYERCUT_RECOVERY_TOKEN` | Recomendada | Llave de emergencia. Sin ella, un bot caído te deja fuera. |
+| `DEEPSEEK_API_KEY` | **Sí** | Guiones, plan de escenas, keywords, asistente. |
+| `CLOUDINARY_URL` | **Sí** en Railway | Backup y restore. Sin ella se pierde todo en cada deploy. |
+| `PEXELS_API_KEY` | Recomendada | Fotos y clips. |
+| `PIXABAY_API_KEY` | No | Otro banco. |
+| `COVERR_API_KEY` | No | Otro banco. |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | No | Fuente Google Drive (cuenta de servicio). |
+| `GDRIVE_VIDEO_FOLDER_ID` | No | Carpeta por defecto de Drive. |
+| `GDRIVE_STORAGE_FOLDER_ID` | No | Almacenamiento en Drive. |
+| `GOOGLE_CREDENTIALS_JSON` | No | Google TTS (`tts_provider: "google"`). |
+| `ANTHROPIC_API_KEY` | No | Claude como LLM alternativo. |
+| `OPENAI_API_KEY` | No | GPT-4o-mini y TTS HD. |
+| `ELEVENLABS_API_KEY` | No | Voces ElevenLabs. |
+| `HYPERFRAMES_URL` | No | Intros/outros animados. **Ver abajo.** |
+| `RETENTION_DAYS` | No | Días antes de caducar (5). |
+| `WHISPER_MODEL` | No | Modelo de transcripción (`base`). |
+| `MAX_CONCURRENT_RENDERS` | No | Renders simultáneos (2). |
+| `YOUTUBE_*`, `TIKTOK_*`, `INSTAGRAM_*` | No | Publicación. |
+
+---
+
+## Estado de las piezas
+
+**HyperFrames** (intros/outros animados y captions kinéticos) era un servicio
+Node aparte en Railway. **Ya no existe**, y su código no está en este repo.
+`/api/motion/status` devuelve `configured` (la variable está puesta) y
+`available` (el servicio responde) por separado — la interfaz mira `available`,
+porque antes miraba sólo la variable y ofrecía funciones que fallaban al usarse.
+Para recuperarlo hay que volver a levantar el microservicio; si no, quitar
+`HYPERFRAMES_URL`.
+
+---
+
+## Estructura
+
 ```
-[video] → subtitles filter → overlay filter → [vout]
-[audio] → volume → [narr]  ─┐
-[music] → volume+fade → [music] ─┤→ amix → [aout]
-                                   │
-Output: -map [vout] -map [aout] → final.mp4
+backend/
+  main.py                    # app, lifespan, middleware de sesión, SPA catch-all
+  app/
+    auth.py                  # login por código de Telegram + llave de emergencia
+    database.py              # modelos SQLAlchemy
+    task_queue.py            # cola async + progreso por WebSocket
+    telegram_bot.py          # el bot entero (comandos, voz, teclados)
+    models/project.py        # ProjectConfig y enums
+    api/                     # projects, layers, render, publish, sources, share,
+                             # gdrive, editing, motion, assistant, library
+    services/
+      project_service.py     # proyectos en SQLite + disco (retención incluida)
+      layer_service.py       # ensamblado de la capa video, A/B, cadencia, voz
+      render_service.py      # el render final con FFmpeg
+      llm_service.py         # guiones con plantillas escalables
+      script_utils.py        # limpieza de guion y presupuesto de duración
+      cloud_storage.py       # backup/restore en Cloudinary
+      ai_editor_service.py   # asistente conversacional (tool-calling)
+      photo_sources.py       # fotos + Ken Burns
+      video_sources.py       # búsqueda en bancos (el selector de clips)
+      media_library_service.py, gdrive_service.py, motion_service.py,
+      tts_service.py, voice_service.py, publish_service.py, editing_service.py
+frontend/src/
+  api.js                     # interceptor de fetch + sesión
+  App.jsx                    # puerta de login + layout
+  components/                # LayerCard, ScriptEditor, ProjectEditor, ...
+tools/webapp/                # LayerCut Downloader: servidor LOCAL, no va a Railway
 ```
-
----
-
-## Como hacer cambios comunes
-
-### Agregar una nueva plantilla de guion
-Editar `backend/app/services/llm_service.py`:
-1. Agregar entrada en `TEMPLATES` dict (linea ~9)
-2. Agregar nombre legible en `get_templates()` (linea ~193)
-
-### Agregar una nueva voz TTS
-Editar `backend/app/api/sources.py` → funcion `list_all_voices()` (linea ~72)
-
-### Cambiar parametros de render
-Editar `backend/app/services/render_service.py`:
-- CRF: linea 132 (22=full, 32=quick)
-- Preset: linea 133 (fast/ultrafast)
-- Audio bitrate: linea 135 (192k/96k)
-
-### Agregar nueva plataforma de publicacion
-1. Crear funcion `publish_xxx()` en `backend/app/services/publish_service.py`
-2. Agregar al dict `PUBLISHERS` (linea ~120)
-3. Agregar ruta en `backend/app/api/publish.py`
-4. Agregar boton en `frontend/src/components/PublishPanel.jsx` → array `PLATFORMS`
-
-### Agregar nuevo endpoint API
-1. Crear/editar archivo en `backend/app/api/`
-2. Registrar router en `backend/main.py` con `app.include_router()`
-
-### Modificar estilos globales
-Editar `frontend/src/index.css` — clases utilitarias: `.btn-outline`, `.btn-action`, `.input-field`
-
-### Cambiar colores del tema
-Color principal: `#0C447C` (azul oscuro). Buscar y reemplazar en componentes JSX.
 
 ---
 
@@ -258,41 +232,34 @@ Color principal: `#0C447C` (azul oscuro). Buscar y reemplazar en componentes JSX
 
 ```bash
 # Backend
-cd backend
-python -m venv .venv && source .venv/bin/activate
+cd backend && python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-DEEPSEEK_API_KEY=sk-xxx JWT_SECRET=dev uvicorn main:app --reload --port 8000
+JWT_SECRET=dev DEEPSEEK_API_KEY=sk-xxx LAYERCUT_RECOVERY_TOKEN=dev-key \
+  uvicorn main:app --reload --port 8000
 
-# Frontend
-cd frontend
-npm install
-npm run dev    # → http://localhost:3000 (proxy → :8000)
+# Frontend (proxy /api → :8000)
+cd frontend && npm install && npm run dev
 ```
 
-## Deploy a Railway
+Sin bot en local, se entra con el valor de `LAYERCUT_RECOVERY_TOKEN`.
 
-```bash
-# Desde la raiz del proyecto
-railway login
-railway link --service layercut
-railway variables set DEEPSEEK_API_KEY=sk-xxx
-railway up --detach
-railway status        # Verificar que este Online
-railway logs          # Ver logs de app
-```
+**El código usa sintaxis 3.10+** (`dict | None`): probar con `python3.11`.
 
 ---
 
-## Base de datos (SQLite)
+## Deploy
 
-Archivo: `layercut.db` en el directorio de trabajo.
+```bash
+git push origin phase1/mobile-first-ui:main   # esto es lo que despliega
+railway status                                 # verificar que quede Online
+```
 
-### Tablas
-- **users**: id, username, password_hash, created_at
-- **projects**: id(8 chars), title, topic, match, match_date, category, tags(JSON), config(JSON), layers(JSON), layer_info(JSON), output, owner_id, timestamps
-- **tasks**: id(uuid), project_id, task_type, status, progress, result, error, timestamps
-- **share_links**: id(16 chars), project_id, token(64 chars), expires_at, views, created_at
-- **scheduled_posts**: id(auto), project_id, platform, scheduled_at, status, meta(JSON), result, created_at
+Durante el arranque aparece un `409 Conflict: terminated by other getUpdates` en
+los logs: el contenedor viejo sigue poleando mientras arranca el nuevo. Es normal
+y se resuelve solo. **No** confundir con el bot muerto de verdad — ese síntoma es
+`pending_update_count` que no baja en
+`api.telegram.org/bot<token>/getWebhookInfo` sin que nadie polee.
 
-### Nota sobre almacenamiento
-Los archivos de capas y renders se almacenan en `projects/{id}/` en el filesystem, no en la DB. En Railway esto es almacenamiento efimero — se pierde en cada deploy. Para persistencia, considerar un volumen de Railway o almacenamiento externo (S3).
+**Tasks de asyncio:** guardar siempre la referencia (`app.state.*`). El loop sólo
+mantiene weakrefs y el recolector puede llevarse una task a mitad de ejecución —
+por eso el bot dejaba de responder de forma intermitente.

@@ -3,11 +3,14 @@ from typing import Optional, Literal
 from enum import Enum
 
 class VideoSource(str, Enum):
+    # Sin `youtube`: no tiene rama en assemble_video_layer, así que la API lo
+    # aceptaba y el pipeline lo ignoraba en silencio. Además se descartó por
+    # copyright — el camino limpio es bajar de YouTube Studio y subir a Drive,
+    # que es justo para lo que existe el Downloader local.
     local = "local"
     pexels = "pexels"
     pixabay = "pixabay"
     coverr = "coverr"
-    youtube = "youtube"
     mixed = "mixed"
     photos = "photos"
     mixed_photos = "mixed_photos"

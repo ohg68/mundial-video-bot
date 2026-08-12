@@ -20,15 +20,21 @@ const TTS_PROVIDERS = [
 
 const OPENAI_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 
+// Las fuentes que el pipeline sabe montar, las mismas que ofrece el bot. Antes
+// esta lista incluía "YouTube CC", que no tiene rama en el ensamblado (elegirlo
+// no daba error: simplemente no hacía lo que prometía), y le faltaban tres que
+// sí funcionan.
 const VIDEO_SOURCES = [
   { key: "local", label: "📁 Mis vídeos" },
   { key: "pexels", label: "🌐 Pexels" },
   { key: "pixabay", label: "🟢 Pixabay" },
   { key: "coverr", label: "🎥 Coverr" },
-  { key: "youtube", label: "▶ YouTube CC" },
+  { key: "stock", label: "🎞 Máxima variedad" },
   { key: "mixed", label: "🔀 Mixto" },
   { key: "photos", label: "🖼 Fotos de Internet" },
-  { key: "mixed_photos", label: "🎞 Mix (Fotos + Video)" },
+  { key: "wikimedia", label: "🏛 Wikimedia (libre)" },
+  { key: "mixed_photos", label: "🎬 Mix (Fotos + Video)" },
+  { key: "gdrive", label: "📁 Google Drive" },
 ]
 
 export default function LayerCard({ projectId, layer, status, config, layerInfo, onUpdate, optional = false }) {

@@ -7,8 +7,14 @@ router = APIRouter()
 
 
 @router.get("/status")
-def service_status():
-    return {"configured": motion_service.is_configured()}
+async def service_status():
+    # `available` es lo que la interfaz debe mirar para ofrecer o no la función;
+    # `configured` se mantiene para distinguir "no lo configuraste" de "lo
+    # configuraste pero el servicio no está".
+    return {
+        "configured": motion_service.is_configured(),
+        "available": await motion_service.is_available(),
+    }
 
 
 @router.get("/{project_id}")

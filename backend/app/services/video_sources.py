@@ -87,24 +87,41 @@ async def search_pexels(query: str, count: int = 12, orientation: str = "portrai
 
 
 async def search_coverr(query: str, count: int = 12) -> list:
+    """Busca clips en Coverr para el selector.
+
+    Le faltaban `api_key` y `urls=true`, así que la API respondía sin los enlaces
+    y el buscador devolvía cero resultados siempre — mientras el pipeline, que
+    usa fetch_coverr_clips y sí manda ambos, traía clips sin problema. Eran dos
+    implementaciones del mismo banco y sólo una estaba completa.
+    """
+    key = os.getenv("COVERR_API_KEY")
+    if not key:
+        log.warning("COVERR_API_KEY no configurada — búsqueda en Coverr deshabilitada")
+        return []
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             "https://api.coverr.co/videos",
-            params={"query": query, "page_size": count},
+            params={"query": query, "page_size": count, "urls": "true", "api_key": key},
             timeout=15,
         )
     if resp.status_code != 200:
+        # El cuerpo real: un "Expecting value" a secas no dice si es la clave,
+        # una cuota agotada o un cambio en la API.
+        log.warning(f"Coverr {resp.status_code}: {resp.text[:150]}")
         return []
     data = resp.json()
     results = []
     for v in data.get("hits", data.get("videos", [])):
         urls = v.get("urls", {})
+        enlace = urls.get("mp4_download") or urls.get("mp4") or urls.get("mp4_preview")
+        if not enlace:
+            continue
         results.append({
             "id": f"coverr_{v.get('id', '')}",
             "source": "coverr",
             "title": v.get("title", ""),
             "thumbnail": v.get("thumbnail", urls.get("poster")),
-            "url": urls.get("mp4_download") or urls.get("mp4_preview"),
+            "url": enlace,
             "duration": v.get("duration", 0),
             "width": 1920,
             "height": 1080,
