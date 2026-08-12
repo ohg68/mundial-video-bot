@@ -4,11 +4,15 @@ import ProjectEditor from "./components/ProjectEditor"
 import NewProjectModal from "./components/NewProjectModal"
 import BottomNav from "./components/BottomNav"
 import MediaLibrary from "./components/MediaLibrary"
+import LoginForm from "./components/LoginForm"
+import useAuth from "./hooks/useAuth"
 import { apiJson } from "./api"
 
-// Uso personal: sin login. Si en el futuro se vuelve multiusuario, se
-// puede reactivar useAuth + LoginForm (siguen en el repo, sin usarse).
+// Uso personal, pero la API está expuesta en internet: sin esta puerta,
+// cualquiera con la URL leía los proyectos y gastaba la cuota de DeepSeek.
+// La sesión se saca con /entrar en el bot; no hay contraseña.
 export default function App() {
+  const { user, loading: cargandoSesion, setUser } = useAuth()
   const [projects, setProjects] = useState([])
   const [selected, setSelected] = useState(null)
   const [showNew, setShowNew] = useState(false)
@@ -25,7 +29,9 @@ export default function App() {
     if (Array.isArray(data)) setProjects(data)
   }
 
-  useEffect(() => { fetchProjects() }, [categoryFilter])
+  // Sin sesión no se piden proyectos: la llamada volvería 401 y dispararía el
+  // evento de logout en bucle.
+  useEffect(() => { if (user) fetchProjects() }, [categoryFilter, user])
 
   const handleCreated = (project) => {
     setProjects(prev => [project, ...prev])
@@ -50,6 +56,18 @@ export default function App() {
     setMobileTab(tab)
     if (tab === "projects") setDrawerOpen(true)
     else setDrawerOpen(false)
+  }
+
+  if (cargandoSesion) {
+    return (
+      <div className="min-h-dvh flex items-center justify-center bg-gray-50 text-gray-400 text-sm">
+        Cargando...
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <LoginForm onLogin={(data) => setUser({ chat_id: data.chat_id })} />
   }
 
   return (

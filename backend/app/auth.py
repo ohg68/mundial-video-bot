@@ -1,109 +1,171 @@
-import os
+"""Autenticación sin contraseña, con Telegram como identidad.
+
+No hay contraseñas: no hay nada que recordar ni que recuperar. Para entrar se le
+pide un código al bot (`/entrar`), que sólo responde a los chats de la whitelist.
+El código vale una vez y cinco minutos; a cambio se recibe una sesión de 30 días.
+
+Telegram ya era la identidad real del sistema —los proyectos guardan el chat_id
+de quien los creó— y el bot corre en este mismo proceso, así que emitir el código
+no necesita ni servidor de correo ni servicio externo.
+
+Llave de emergencia: si `LAYERCUT_RECOVERY_TOKEN` está definida, ese valor vale
+como sesión por sí mismo. Es la salida si el bot se cae o Telegram falla — se lee
+del panel de Railway y se pega en la web. Sin esto, un bot roto dejaría al dueño
+fuera de su propio sistema sin más arreglo que redesplegar.
+"""
+import base64
 import hashlib
 import hmac
 import json
+import logging
+import os
+import secrets
 import time
-import base64
-from fastapi import APIRouter, HTTPException, Depends, Request
+
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from app.database import get_db, User, SessionLocal
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
 SECRET_KEY = os.getenv("JWT_SECRET", "layercut-dev-secret-change-in-production")
-TOKEN_EXPIRY = 86400 * 7  # 7 days
+TOKEN_EXPIRY = 86400 * 30          # 30 días: entrar es un trámite, no un hábito
+CODE_EXPIRY = 300                  # 5 minutos para copiar 6 dígitos
+MAX_CODE_ATTEMPTS = 5              # frena la fuerza bruta sobre 10^6 combinaciones
+
+# code -> {"chat_id": int, "expira": float}. En memoria a propósito: los códigos
+# viven cinco minutos y guardarlos en SQLite ensuciaría el backup a Cloudinary que
+# corre cada cinco. Si el contenedor reinicia justo en medio, se pide otro.
+_CODIGOS: dict[str, dict] = {}
+_INTENTOS = {"fallos": 0, "desde": time.time()}
 
 
-def _hash_password(password: str) -> str:
-    salt = "layercut"
-    return hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
+# ── Sesiones ──────────────────────────────────────────────────────────────────
 
-
-def _create_token(user_id: int, username: str) -> str:
-    payload = {
-        "user_id": user_id,
-        "username": username,
-        "exp": int(time.time()) + TOKEN_EXPIRY,
-    }
+def _create_token(chat_id: int) -> str:
+    payload = {"chat_id": chat_id, "exp": int(time.time()) + TOKEN_EXPIRY}
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     sig = hmac.new(SECRET_KEY.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
     return f"{payload_b64}.{sig}"
 
 
-def _verify_token(token: str) -> dict:
+def _verify_token(token: str) -> dict | None:
+    # La llave de emergencia vale como sesión. compare_digest para no filtrar
+    # cuántos caracteres coinciden por el tiempo de respuesta.
+    recovery = os.getenv("LAYERCUT_RECOVERY_TOKEN", "")
+    if recovery and hmac.compare_digest(token, recovery):
+        return {"chat_id": None, "via": "recovery"}
+
     try:
         payload_b64, sig = token.rsplit(".", 1)
-        expected_sig = hmac.new(SECRET_KEY.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected_sig):
+        esperada = hmac.new(SECRET_KEY.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, esperada):
             return None
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
         if payload.get("exp", 0) < time.time():
             return None
+        payload["via"] = "telegram"
         return payload
     except Exception:
         return None
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-):
+def is_valid_token(token: str | None) -> bool:
+    """Lo usa el middleware que protege /api."""
+    return bool(token) and _verify_token(token) is not None
+
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if not credentials:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail="No autenticado")
     payload = _verify_token(credentials.credentials)
     if not payload:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Sesión inválida o vencida")
     return payload
 
 
-async def get_optional_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-):
-    if not credentials:
-        return None
-    payload = _verify_token(credentials.credentials)
-    return payload
+async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    return _verify_token(credentials.credentials) if credentials else None
 
 
-@router.post("/register")
-def register(body: dict):
-    username = body.get("username", "").strip()
-    password = body.get("password", "")
-    if not username or len(password) < 4:
-        raise HTTPException(status_code=400, detail="Username and password (min 4 chars) required")
+# ── Códigos de un solo uso ────────────────────────────────────────────────────
 
-    db = SessionLocal()
-    try:
-        existing = db.query(User).filter(User.username == username).first()
-        if existing:
-            raise HTTPException(status_code=409, detail="Username already exists")
-
-        user = User(username=username, password_hash=_hash_password(password))
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        token = _create_token(user.id, user.username)
-        return {"token": token, "username": user.username, "user_id": user.id}
-    finally:
-        db.close()
+def _limpiar_vencidos():
+    ahora = time.time()
+    for code in [c for c, d in _CODIGOS.items() if d["expira"] < ahora]:
+        _CODIGOS.pop(code, None)
 
 
-@router.post("/login")
-def login(body: dict):
-    username = body.get("username", "").strip()
-    password = body.get("password", "")
+def issue_login_code(chat_id: int) -> tuple[str, int]:
+    """Emite un código para ese chat. Lo llama el bot desde /entrar.
 
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.username == username).first()
-        if not user or user.password_hash != _hash_password(password):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        token = _create_token(user.id, user.username)
-        return {"token": token, "username": user.username, "user_id": user.id}
-    finally:
-        db.close()
+    Devuelve (código, minutos de validez). Cada emisión invalida la anterior del
+    mismo chat: si pediste otro es porque el primero se perdió, y dejar los viejos
+    vivos sólo alarga la ventana en la que sirven.
+    """
+    _limpiar_vencidos()
+    for code in [c for c, d in _CODIGOS.items() if d["chat_id"] == chat_id]:
+        _CODIGOS.pop(code, None)
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    _CODIGOS[code] = {"chat_id": chat_id, "expira": time.time() + CODE_EXPIRY}
+    return code, CODE_EXPIRY // 60
+
+
+def _registrar_fallo() -> bool:
+    """Cuenta intentos fallidos en ventanas de 15 min. True si hay que cortar."""
+    ahora = time.time()
+    if ahora - _INTENTOS["desde"] > 900:
+        _INTENTOS.update(fallos=0, desde=ahora)
+    _INTENTOS["fallos"] += 1
+    return _INTENTOS["fallos"] > MAX_CODE_ATTEMPTS
+
+
+@router.post("/telegram/verify")
+def verify_code(body: dict):
+    """Canjea un código del bot por una sesión.
+
+    Acepta también la llave de emergencia en el mismo campo: si el bot no
+    responde, quien entra no tiene otro sitio donde pegarla, y mandarlo a
+    construir una cabecera Authorization a mano no es una salida de emergencia.
+    """
+    code = str(body.get("code", "")).strip().replace(" ", "")
+    if not code:
+        raise HTTPException(status_code=400, detail="Falta el código")
+
+    recovery = os.getenv("LAYERCUT_RECOVERY_TOKEN", "")
+    if recovery and hmac.compare_digest(code, recovery):
+        log.warning("Auth: sesión abierta con la llave de emergencia")
+        return {"token": recovery, "chat_id": None, "via": "recovery"}
+
+    _limpiar_vencidos()
+    datos = _CODIGOS.pop(code, None)          # pop: un código sirve una sola vez
+    if not datos:
+        if _registrar_fallo():
+            log.warning("Auth: demasiados códigos fallidos, cortando por 15 minutos")
+            raise HTTPException(
+                status_code=429,
+                detail="Demasiados intentos fallidos. Esperá 15 minutos y pedí un código nuevo.")
+        raise HTTPException(status_code=401, detail="Código incorrecto o vencido. Pedí otro con /entrar.")
+
+    _INTENTOS.update(fallos=0, desde=time.time())
+    log.info("Auth: sesión abierta para el chat %s", datos["chat_id"])
+    return {"token": _create_token(datos["chat_id"]), "chat_id": datos["chat_id"]}
 
 
 @router.get("/me")
 async def me(user=Depends(get_current_user)):
-    return {"username": user["username"], "user_id": user["user_id"]}
+    return {"chat_id": user.get("chat_id"), "via": user.get("via")}
+
+
+@router.get("/status")
+def status():
+    """Qué vías de entrada están disponibles. Sin autenticar: lo consulta la
+    pantalla de login para saber qué explicarle a quien entra."""
+    return {
+        "telegram": bool(os.getenv("TELEGRAM_BOT_TOKEN")) and bool(
+            os.getenv("TELEGRAM_ALLOWED_CHATS", "").strip()),
+        "recovery": bool(os.getenv("LAYERCUT_RECOVERY_TOKEN")),
+    }

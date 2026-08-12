@@ -13,13 +13,19 @@ def list_projects(
     tag: Optional[str] = Query(None),
     user=Depends(get_optional_user),
 ):
-    owner_id = user["user_id"] if user else None
-    return project_service.list_projects(owner_id=owner_id, category=category, tag=tag)
+    # Sin filtrar por dueño a propósito: el sistema es de una sola persona y ya
+    # hay que estar autenticado para llegar hasta acá. Filtrando, los proyectos
+    # anteriores al seguimiento de dueño (owner_id nulo) desaparecerían de la web
+    # sin haberse borrado.
+    return project_service.list_projects(owner_id=None, category=category, tag=tag)
 
 
 @router.post("/")
 async def create_project(config: ProjectConfig, user=Depends(get_optional_user)):
-    owner_id = user["user_id"] if user else None
+    # El dueño es el chat de Telegram de la sesión, para que _owns() del bot siga
+    # reconociendo como propios los proyectos creados desde la web. Con la llave
+    # de emergencia no hay chat, y queda sin dueño como los antiguos.
+    owner_id = user.get("chat_id") if user else None
     result = project_service.create_project(config, owner_id=owner_id)
     from app.services import cloud_storage
     await cloud_storage.backup_db()

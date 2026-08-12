@@ -511,6 +511,34 @@ async def on_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
+async def cmd_entrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Emite el código de un solo uso para entrar a la web.
+
+    Exige whitelist configurada aunque el bot esté abierto para lo demás: sin
+    ella, cualquiera que encontrara el bot podría pedir un código y entrar. Ante
+    la duda, cerrado — para eso está la llave de emergencia de Railway.
+    """
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not _allowed_chats():
+        await update.message.reply_text(
+            "🔒 La entrada por Telegram está sin configurar.\n\n"
+            f"Tu chat ID es `{chat_id}`. Ponelo en la variable "
+            "`TELEGRAM_ALLOWED_CHATS` de Railway y volvé a intentar.\n\n"
+            "Mientras tanto podés entrar con el token de emergencia.",
+            parse_mode="Markdown")
+        return
+    if not await _guard(update):
+        return
+
+    from app.auth import issue_login_code
+    code, minutos = issue_login_code(chat_id)
+    await update.message.reply_text(
+        f"🔑 Tu código para entrar:\n\n`{code}`\n\n"
+        f"Vence en {minutos} minutos y sirve una sola vez.\n"
+        f"Pegalo en la web y quedás dentro 30 días.",
+        parse_mode="Markdown")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if update.effective_chat else "?"
     if not await _guard(update):
@@ -518,6 +546,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 *LayerCut Bot — Mundial 2026*\n\n"
         "Genera videos automáticamente sobre el Mundial.\n\n"
+        "*Entrar a la web:*\n"
+        "• /entrar — Código de un solo uso\n\n"
         "*Crear y gestionar:*\n"
         "• /nuevo — Crear nuevo video\n"
         "• /ultimos — Ver últimos proyectos (IDs copiables)\n"
@@ -1771,6 +1801,7 @@ def build_app(token: str) -> Application:
         fallbacks=[CommandHandler("cancelar", cmd_cancelar)],
     )
 
+    application.add_handler(CommandHandler("entrar", cmd_entrar))
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("listar", cmd_listar))
     application.add_handler(CommandHandler("ultimos", cmd_ultimos))

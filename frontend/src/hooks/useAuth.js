@@ -1,27 +1,33 @@
 import { useState, useEffect, useCallback } from "react"
-import { getToken, setToken, clearToken, apiJson } from "../api"
+import { getToken, clearToken, api } from "../api"
 
+/**
+ * Estado de sesión. No hay login con usuario/contraseña: la sesión se obtiene
+ * canjeando el código que emite el bot (ver LoginForm), así que acá sólo queda
+ * comprobar si el token guardado sigue valiendo y poder cerrarla.
+ */
 export default function useAuth() {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
 
   const checkAuth = useCallback(async () => {
-    const token = getToken()
-    if (!token) {
+    if (!getToken()) {
       setUser(null)
       setLoading(false)
       return
     }
     try {
-      const data = await apiJson("/api/auth/me")
-      if (data.username) {
-        setUser(data)
+      const res = await api("/api/auth/me")
+      if (res.ok) {
+        setUser(await res.json())
       } else {
+        // 401 ya limpia el token dentro de api(); acá sólo reflejamos el estado.
         clearToken()
         setUser(null)
       }
     } catch {
-      clearToken()
+      // Sin red no se puede afirmar que la sesión sea inválida: no se borra el
+      // token, sólo se queda sin usuario hasta el próximo intento.
       setUser(null)
     }
     setLoading(false)
@@ -29,45 +35,15 @@ export default function useAuth() {
 
   useEffect(() => {
     checkAuth()
-    const handleLogout = () => { setUser(null); setLoading(false) }
-    window.addEventListener("auth:logout", handleLogout)
-    return () => window.removeEventListener("auth:logout", handleLogout)
+    const onLogout = () => { setUser(null); setLoading(false) }
+    window.addEventListener("auth:logout", onLogout)
+    return () => window.removeEventListener("auth:logout", onLogout)
   }, [checkAuth])
-
-  const login = async (username, password) => {
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    })
-    const data = await res.json()
-    if (res.ok && data.token) {
-      setToken(data.token)
-      setUser({ username: data.username, user_id: data.user_id })
-      return { ok: true }
-    }
-    return { ok: false, error: data.detail || "Error" }
-  }
-
-  const register = async (username, password) => {
-    const res = await fetch("/api/auth/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    })
-    const data = await res.json()
-    if (res.ok && data.token) {
-      setToken(data.token)
-      setUser({ username: data.username, user_id: data.user_id })
-      return { ok: true }
-    }
-    return { ok: false, error: data.detail || "Error" }
-  }
 
   const logout = () => {
     clearToken()
     setUser(null)
   }
 
-  return { user, loading, login, register, logout }
+  return { user, loading, setUser, logout }
 }

@@ -1,11 +1,12 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from app.api import projects, layers, render, publish, sources, share, gdrive, editing, motion, assistant, library
+from app import auth as auth_module
 from app.auth import router as auth_router
 from app.database import init_db
 from app.migrate import migrate_json_to_db
@@ -113,6 +114,40 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LayerCut API", version="2.0.0", lifespan=lifespan)
+
+
+# Rutas de /api que tienen que seguir abiertas:
+#  - la verificación del código, que es justo de donde sale la sesión
+#  - el estado del login, que la pantalla de entrada consulta antes de tener una
+#  - las vistas públicas de share, cuyo sentido es compartir con gente sin cuenta
+#    (el token del enlace es la credencial, y caduca solo)
+_API_PUBLICA = (
+    "/api/auth/telegram/verify",
+    "/api/auth/status",
+    "/api/share/view/",
+    "/api/share/video/",
+    "/api/share/thumb/",
+)
+
+
+@app.middleware("http")
+async def exigir_sesion(request: Request, call_next):
+    """Cierra /api salvo lo público. Antes toda la API estaba abierta a internet:
+    cualquiera con la URL leía los proyectos enteros —guiones incluidos—, creaba
+    otros gastando cuota de DeepSeek, lanzaba renders y borraba lo que quisiera."""
+    ruta = request.url.path
+    if (ruta.startswith("/api")
+            and request.method != "OPTIONS"          # el preflight de CORS no lleva cabecera
+            and not ruta.startswith(_API_PUBLICA)):
+        cabecera = request.headers.get("authorization", "")
+        token = cabecera[7:] if cabecera[:7].lower() == "bearer " else None
+        if not auth_module.is_valid_token(token):
+            return JSONResponse({"detail": "No autenticado"}, status_code=401)
+    return await call_next(request)
+
+
+# allow_credentials no se activa: la sesión viaja en la cabecera Authorization, no
+# en cookies, así que el navegador no la manda sola desde otro origen.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
