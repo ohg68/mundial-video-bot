@@ -157,8 +157,15 @@ export default function ProjectList({
                 <input
                   type="checkbox"
                   checked={checked.has(p.id)}
+                  // La fila entera ya alterna la selección al pulsarla. Sin
+                  // frenar el clic acá, pulsar la casilla disparaba los dos
+                  // manejadores —el suyo y el de la fila al burbujear— y la
+                  // selección se marcaba y desmarcaba en el mismo gesto: quedaba
+                  // igual que antes. Pulsar el texto sí funcionaba, lo que hacía
+                  // el fallo aún más desconcertante.
+                  onClick={e => e.stopPropagation()}
                   onChange={() => toggleCheck(p.id)}
-                  className="mt-1 w-4 h-4 accent-[#0C447C]"
+                  className="mt-1 w-4 h-4 accent-[#0C447C] cursor-pointer"
                 />
               )}
               <div className="flex-1 min-w-0">
