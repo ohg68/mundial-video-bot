@@ -209,23 +209,9 @@ def logout(response: Response):
 
 
 @router.get("/me")
-async def me(request: Request, response: Response,
-             credentials: HTTPAuthorizationCredentials = Depends(security),
-             user=Depends(get_current_user)):
-    """Quién es el de la sesión — y, de paso, le repone la cookie si no la tiene.
-
-    La cookie sólo se entregaba al canjear el código, así que a quien ya estaba
-    dentro desde antes de que existiera no le llegó nunca: sus llamadas por
-    fetch seguían funcionando con la cabecera, pero el `<video>` y el `<audio>`
-    —que el navegador pide por su cuenta, sin cabecera— cobraban 401 y el
-    reproductor se quedaba en negro. Sin esto habría que salir y volver a
-    entrar para que los medios se vean.
-
-    El token ya viene validado por `get_current_user`; acá sólo se copia a la
-    cookie.
-    """
-    if not request.cookies.get(COOKIE_NAME) and credentials:
-        set_session_cookie(response, credentials.credentials, request)
+async def me(user=Depends(get_current_user)):
+    # Reponer la cookie a las sesiones que no la tienen es cosa del middleware
+    # de `main`, que ve todas las llamadas y no sólo ésta.
     return {"chat_id": user.get("chat_id"), "via": user.get("via")}
 
 

@@ -136,19 +136,35 @@ async def exigir_sesion(request: Request, call_next):
     cualquiera con la URL leía los proyectos enteros —guiones incluidos—, creaba
     otros gastando cuota de DeepSeek, lanzaba renders y borraba lo que quisiera."""
     ruta = request.url.path
+    reponer_cookie = None
     if (ruta.startswith("/api")
             and request.method != "OPTIONS"          # el preflight de CORS no lleva cabecera
             and not ruta.startswith(_API_PUBLICA)):
         cabecera = request.headers.get("authorization", "")
-        token = cabecera[7:] if cabecera[:7].lower() == "bearer " else None
+        de_cabecera = cabecera[7:] if cabecera[:7].lower() == "bearer " else None
         # Si no hay cabecera, la cookie: el navegador pide los medios por su
         # cuenta (<video src>, <img src>, window.open) y esas peticiones no pasan
         # por fetch, así que nunca llevan la cabecera.
-        if not token:
-            token = request.cookies.get(auth_module.COOKIE_NAME)
+        de_cookie = request.cookies.get(auth_module.COOKIE_NAME)
+        token = de_cabecera or de_cookie
         if not auth_module.is_valid_token(token):
             return JSONResponse({"detail": "No autenticado"}, status_code=401)
-    return await call_next(request)
+
+        # Sesión que entró por cabecera y no tiene cookie: es la de quien ya
+        # estaba dentro desde antes de que la cookie existiera. Se la repone acá,
+        # en la primera llamada que haga, y no al recargar la página: si
+        # dependiera de eso, la pestaña que ya está abierta seguiría sin poder
+        # cargar el <video> hasta que a alguien se le ocurriera refrescar.
+        #
+        # Menos en logout, que justo viene a borrarla: reponerla después de que
+        # la borró dejaría la sesión abierta.
+        if de_cabecera and not de_cookie and ruta != "/api/auth/logout":
+            reponer_cookie = de_cabecera
+
+    respuesta = await call_next(request)
+    if reponer_cookie:
+        auth_module.set_session_cookie(respuesta, reponer_cookie, request)
+    return respuesta
 
 
 # allow_credentials no se activa: la sesión viaja en la cabecera Authorization, no
