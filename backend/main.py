@@ -141,6 +141,11 @@ async def exigir_sesion(request: Request, call_next):
             and not ruta.startswith(_API_PUBLICA)):
         cabecera = request.headers.get("authorization", "")
         token = cabecera[7:] if cabecera[:7].lower() == "bearer " else None
+        # Si no hay cabecera, la cookie: el navegador pide los medios por su
+        # cuenta (<video src>, <img src>, window.open) y esas peticiones no pasan
+        # por fetch, así que nunca llevan la cabecera.
+        if not token:
+            token = request.cookies.get(auth_module.COOKIE_NAME)
         if not auth_module.is_valid_token(token):
             return JSONResponse({"detail": "No autenticado"}, status_code=401)
     return await call_next(request)

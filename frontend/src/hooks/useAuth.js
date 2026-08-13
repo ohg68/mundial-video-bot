@@ -40,7 +40,10 @@ export default function useAuth() {
     return () => window.removeEventListener("auth:logout", onLogout)
   }, [checkAuth])
 
-  const logout = () => {
+  const logout = async () => {
+    // La cookie es HttpOnly: sólo el servidor puede borrarla. Sin esta llamada,
+    // cerrar sesión dejaría los medios accesibles.
+    await api("/api/auth/logout", { method: "POST" }).catch(() => {})
     clearToken()
     setUser(null)
   }

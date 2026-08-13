@@ -22,7 +22,7 @@ import os
 import secrets
 import time
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 log = logging.getLogger(__name__)
@@ -72,22 +72,60 @@ def _verify_token(token: str) -> dict | None:
         return None
 
 
+COOKIE_NAME = "layercut_session"
+
+
 def is_valid_token(token: str | None) -> bool:
     """Lo usa el middleware que protege /api."""
     return bool(token) and _verify_token(token) is not None
 
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if not credentials:
+def set_session_cookie(response: Response, token: str, request: Request):
+    """Guarda la sesión también en una cookie.
+
+    Hace falta porque el navegador pide los medios por su cuenta: un
+    `<video src="/api/layers/.../download/video">`, un `<img>` de miniatura o un
+    `window.open` para descargar NO pasan por fetch, así que el interceptor que
+    pone la cabecera Authorization no llega a verlos y salían sin credencial.
+    La cookie sí viaja sola en esas peticiones.
+
+    HttpOnly para que el JavaScript no pueda leerla, y SameSite=Lax para que no
+    acompañe a peticiones que vengan de otro sitio.
+    """
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    response.set_cookie(
+        COOKIE_NAME, token,
+        max_age=TOKEN_EXPIRY,
+        httponly=True,
+        samesite="lax",
+        # En local se sirve por http y una cookie Secure no se guardaría.
+        secure=(proto == "https"),
+        path="/",
+    )
+
+
+def _token_de(request: Request, credentials) -> str | None:
+    """La sesión, venga por cabecera o por cookie."""
+    if credentials:
+        return credentials.credentials
+    return request.cookies.get(COOKIE_NAME)
+
+
+async def get_current_user(request: Request,
+                           credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = _token_de(request, credentials)
+    if not token:
         raise HTTPException(status_code=401, detail="No autenticado")
-    payload = _verify_token(credentials.credentials)
+    payload = _verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Sesión inválida o vencida")
     return payload
 
 
-async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    return _verify_token(credentials.credentials) if credentials else None
+async def get_optional_user(request: Request,
+                            credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = _token_de(request, credentials)
+    return _verify_token(token) if token else None
 
 
 # ── Códigos de un solo uso ────────────────────────────────────────────────────
@@ -124,7 +162,7 @@ def _registrar_fallo() -> bool:
 
 
 @router.post("/telegram/verify")
-def verify_code(body: dict):
+def verify_code(body: dict, request: Request, response: Response):
     """Canjea un código del bot por una sesión.
 
     Acepta también la llave de emergencia en el mismo campo: si el bot no
@@ -138,6 +176,7 @@ def verify_code(body: dict):
     recovery = os.getenv("LAYERCUT_RECOVERY_TOKEN", "")
     if recovery and hmac.compare_digest(code, recovery):
         log.warning("Auth: sesión abierta con la llave de emergencia")
+        set_session_cookie(response, recovery, request)
         return {"token": recovery, "chat_id": None, "via": "recovery"}
 
     _limpiar_vencidos()
@@ -152,7 +191,21 @@ def verify_code(body: dict):
 
     _INTENTOS.update(fallos=0, desde=time.time())
     log.info("Auth: sesión abierta para el chat %s", datos["chat_id"])
-    return {"token": _create_token(datos["chat_id"]), "chat_id": datos["chat_id"]}
+    token = _create_token(datos["chat_id"])
+    set_session_cookie(response, token, request)
+    return {"token": token, "chat_id": datos["chat_id"]}
+
+
+@router.post("/logout")
+def logout(response: Response):
+    """Cierra la sesión del lado del servidor borrando la cookie.
+
+    El token de localStorage lo borra el frontend, pero la cookie es HttpOnly y
+    sólo se puede quitar desde acá: sin esto, "cerrar sesión" dejaría los medios
+    accesibles.
+    """
+    response.delete_cookie(COOKIE_NAME, path="/")
+    return {"ok": True}
 
 
 @router.get("/me")
