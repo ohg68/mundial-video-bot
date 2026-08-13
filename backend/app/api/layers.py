@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks, Request
+from app.media_http import serve_media
 from app.models.project import ProjectConfig, LayerUpdate, LayerStatus
 from app.services import project_service, layer_service, render_service, tts_service, llm_service, sfx_service, bg_removal_service
 import tempfile, shutil, json
@@ -198,11 +198,21 @@ async def update_layer_config(project_id: str, layer: str, update: dict):
 
 
 @router.get("/{project_id}/download/{layer}")
-async def download_layer(project_id: str, layer: str):
+async def download_layer(project_id: str, layer: str, request: Request,
+                         download: bool = False):
+    """La capa: para el reproductor, o para el botón de descargar.
+
+    Va `inline` salvo que pidan `?download=1`. Esta misma URL es el `src` del
+    `<video>`/`<audio>` de la vista previa, y mandarla siempre como adjunto es
+    decirle al navegador que eso no se mira, se guarda.
+    """
+    if layer not in project_service.LAYER_FILES:
+        raise HTTPException(status_code=404, detail=f"'{layer}' no es una capa")
     layer_path = project_service.get_layer_path(project_id, layer)
     if not layer_path.exists():
         raise HTTPException(status_code=404, detail="Layer file not found")
-    return FileResponse(str(layer_path), filename=layer_path.name)
+    return serve_media(layer_path, request,
+                       download_name=layer_path.name if download else None)
 
 
 @router.patch("/{project_id}/script")
@@ -252,12 +262,14 @@ async def list_sfx(project_id: str):
 
 
 @router.get("/{project_id}/sfx/{filename}")
-async def download_sfx(project_id: str, filename: str):
-    """Descarga un foley del proyecto."""
+async def download_sfx(project_id: str, filename: str, request: Request,
+                       download: bool = False):
+    """Un foley del proyecto, para escucharlo o para bajarlo."""
     path = sfx_service.sfx_dir(project_id) / Path(filename).name
     if not path.exists():
         raise HTTPException(status_code=404, detail="Foley no encontrado")
-    return FileResponse(str(path), filename=path.name)
+    return serve_media(path, request,
+                       download_name=path.name if download else None)
 
 
 @router.delete("/{project_id}/sfx")

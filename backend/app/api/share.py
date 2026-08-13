@@ -2,11 +2,12 @@ import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.media_http import serve_media
 from app.database import get_db, ShareLink
 from app.services import project_service
 
@@ -103,7 +104,7 @@ async def view_share(token: str, db: Session = Depends(get_db)):
 
 
 @router.get("/video/{token}")
-async def stream_share_video(token: str, db: Session = Depends(get_db)):
+async def stream_share_video(token: str, request: Request, db: Session = Depends(get_db)):
     link = db.query(ShareLink).filter(ShareLink.token == token).first()
     if not link:
         raise HTTPException(status_code=404, detail="Link not found")
@@ -113,7 +114,7 @@ async def stream_share_video(token: str, db: Session = Depends(get_db)):
     output = Path("projects") / link.project_id / "output" / "final.mp4"
     if not output.exists():
         raise HTTPException(status_code=404, detail="Video not rendered yet")
-    return FileResponse(output, media_type="video/mp4")
+    return serve_media(output, request, media_type="video/mp4")
 
 
 @router.get("/thumb/{token}")

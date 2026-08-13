@@ -1,6 +1,6 @@
 """Intros/outros animados (HyperFrames)."""
-from fastapi import APIRouter, HTTPException, Body
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Body, Request
+from app.media_http import serve_media
 from app.services import motion_service, project_service
 
 router = APIRouter()
@@ -54,14 +54,15 @@ async def generate(project_id: str, kind: str, body: dict = Body(default={})):
 
 
 @router.get("/{project_id}/{kind}/preview")
-async def preview(project_id: str, kind: str):
+async def preview(project_id: str, kind: str, request: Request):
     if kind not in motion_service.MOTION_KINDS:
         raise HTTPException(status_code=400, detail="kind debe ser intro, outro o captions")
     p = motion_service.motion_path(project_id, kind)
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"No hay {kind} generada")
     media = "video/webm" if p.suffix == ".webm" else "video/mp4"
-    return FileResponse(str(p), media_type=media, filename=p.name)
+    # Sin `download_name`: esto es sólo una vista previa, nunca una descarga.
+    return serve_media(p, request, media_type=media)
 
 
 @router.delete("/{project_id}/{kind}")

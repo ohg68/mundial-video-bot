@@ -68,7 +68,7 @@ export default function RenderHistory({ projectId, onClose }) {
               </div>
               <div className="flex gap-1.5 shrink-0">
                 <a
-                  href={`/api/render/${projectId}/history/${h.filename}`}
+                  href={`/api/render/${projectId}/history/${h.filename}?download=1`}
                   download
                   className="btn-action no-underline"
                 >

@@ -99,7 +99,7 @@ export default function LayerCard({ projectId, layer, status, config, layerInfo,
   }
 
   const handleDownload = () => {
-    window.open(`/api/layers/${projectId}/download/${layer.key}`, "_blank")
+    window.open(`/api/layers/${projectId}/download/${layer.key}?download=1`, "_blank")
   }
 
   const handleVolumeChange = async (val) => {

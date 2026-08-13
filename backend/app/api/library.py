@@ -1,46 +1,12 @@
-import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Body, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 
+from app.media_http import serve_media
 from app.services import media_library_service as lib
 
 router = APIRouter()
-
-
-def _range_response(path: Path, request: Request):
-    """Sirve un archivo con soporte de HTTP Range — necesario para que un
-    <video> pueda buscar/adelantar en el reproductor de recorte."""
-    size = path.stat().st_size
-    ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-    range_header = request.headers.get("range")
-
-    start, end = 0, size - 1
-    status = 200
-    if range_header and range_header.startswith("bytes="):
-        status = 206
-        rng = range_header[6:].split("-")
-        start = int(rng[0]) if rng[0] else 0
-        end = int(rng[1]) if len(rng) > 1 and rng[1] else size - 1
-        end = min(end, size - 1)
-    length = end - start + 1
-
-    def _iter():
-        with open(path, "rb") as f:
-            f.seek(start)
-            remaining = length
-            while remaining > 0:
-                chunk = f.read(min(65536, remaining))
-                if not chunk:
-                    break
-                yield chunk
-                remaining -= len(chunk)
-
-    headers = {"Accept-Ranges": "bytes", "Content-Length": str(length)}
-    if status == 206:
-        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-    return StreamingResponse(_iter(), status_code=status, media_type=ctype, headers=headers)
 
 
 @router.post("/")
@@ -117,7 +83,7 @@ async def get_video(asset_id: str, request: Request):
                 path = None
         if not path or not path.exists():
             raise HTTPException(404, "El archivo no está disponible")
-    return _range_response(path, request)
+    return serve_media(path, request)
 
 
 @router.get("/{asset_id}/thumbnail")

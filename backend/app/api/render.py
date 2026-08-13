@@ -3,8 +3,8 @@ import asyncio
 import shutil
 from pathlib import Path
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from app.media_http import serve_media
 from app.services import render_service, project_service
 from app.websocket import manager, parse_ffmpeg_progress
 
@@ -82,11 +82,15 @@ def _save_to_history(project_id: str, output_path: Path, quality: str):
 
 
 @router.get("/{project_id}/download")
-async def download_output(project_id: str):
+async def download_output(project_id: str, request: Request, download: bool = False):
+    """El render final. Es a la vez el `src` del reproductor del editor y el
+    destino del botón de descargar, así que sólo va como adjunto con
+    `?download=1`."""
     output_path = PROJECTS_DIR / project_id / "output" / "final.mp4"
     if not output_path.exists():
         raise HTTPException(status_code=404, detail="Output not ready yet")
-    return FileResponse(str(output_path), filename=f"{project_id}_final.mp4")
+    return serve_media(output_path, request,
+                       download_name=f"{project_id}_final.mp4" if download else None)
 
 
 @router.get("/{project_id}/history")
@@ -98,11 +102,13 @@ async def render_history(project_id: str):
 
 
 @router.get("/{project_id}/history/{filename}")
-async def download_history_render(project_id: str, filename: str):
+async def download_history_render(project_id: str, filename: str, request: Request,
+                                  download: bool = False):
     path = PROJECTS_DIR / project_id / "output" / "history" / filename
     if not path.exists() or ".." in filename:
         raise HTTPException(status_code=404, detail="Render not found")
-    return FileResponse(str(path), filename=filename)
+    return serve_media(path, request,
+                       download_name=filename if download else None)
 
 
 @router.delete("/{project_id}/history/{filename}")

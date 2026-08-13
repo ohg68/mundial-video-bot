@@ -262,7 +262,9 @@ export default function ProjectEditor({ project: initialProject, onRefresh, onMe
                 </button>
 
                 <div className="flex gap-1.5 mb-1.5">
-                  <a href={outputUrl} download title="Descargar"
+                  {/* ?download=1: la misma URL es el src del reproductor, y sin
+                      esto el archivo se bajaría llamado "download", sin extensión. */}
+                  <a href={`${outputUrl}?download=1`} download title="Descargar"
                     className="flex-1 text-center py-1.5 rounded-lg border border-gray-200 text-[13px] no-underline text-gray-600 hover:bg-gray-50">⬇</a>
                   <button onClick={() => setShowPublish(true)} title="Publicar"
                     className="flex-1 py-1.5 rounded-lg border border-gray-200 bg-white text-[13px] cursor-pointer text-gray-600 hover:bg-gray-50">📤</button>
